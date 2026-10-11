@@ -12,16 +12,23 @@ The Rust crate mirrors the TypeScript harness functionally. This file tracks wha
 - Permission gate: modes, scoped rules (tool/risk/server), always-allow, audit; noninteractive default deny; `--yes`/`--permission-mode`.
 - Four-layer settings hierarchy with flag/env/hl-harness/Pi precedence; `settings` command; `trust status|list|grant|revoke`; `cache` inspection; `models` discovery; `run --json` event stream.
 
+## Ported (phase 2, in addition to phase 1)
+
+- `web_search` (Brave key or DuckDuckGo HTML parsing) and `web_fetch` with literal private/local host blocking (unit-tested against the TS host list).
+- Background jobs (`bash_background`/`bash_job`/`bash_cancel`), persistent shells (`bash_session`/`bash_session_close`) with the marker protocol and 120s timeout.
+- `bash_sandbox` (macOS `sandbox-exec` profile / Linux bubblewrap arg set) with fail-closed behavior on unsupported hosts or missing backends.
+- Filesystem watches (`watch_start`/`watch_changes`/`watch_stop`) on the `notify` crate, bounded to 100 events.
+- SQLite (`database_query` read-only SELECT/EXPLAIN, `database_execute`) on `rusqlite` (bundled), run on the blocking pool.
+- Session compaction persistence: `appendCompactionFromMessageIndex` ported and wired into the CLI compaction callback.
+
 ## Not ported yet (in functional order)
 
-1. **TUI** — transcript, tool cards, workspace widgets, diff/cache/conflicts views, approval modal, MCP elicitation/sampling prompts. (Cross-Language note: the TS TUI will not be reproduced line-for-line; the Rust TUI will use crossterm/ratatui with the same feature set.)
-2. **Session compaction persistence** — `appendCompactionFromMessageIndex` linkage is not wired into the CLI's compaction callback yet (the agent compacts in memory; session persistence of compaction entries lands with phase 2).
-3. **Tools**: background jobs, persistent shells, `bash_session*`, `bash_sandbox` (macOS sandbox-exec / Linux bubblewrap), `watch_start/changes/stop`, `database_query/execute` (SQLite), `web_search`/`web_fetch` (with private-host blocking).
-4. **Browser automation** — CDP session (launch/reconnect/tabs/eval/click/text/screenshot/close/shutdown) without Playwright.
-5. **MCP** — stdio + Streamable HTTP clients, OAuth persistence, elicitation/sampling, permission-gated `mcp__server__tool` calls.
-6. **Extensions/packages** — child-process extension host (custom tools, commands, providers, hooks), resource discovery, package install/update/remove, package settings layers.
-7. **Provider runtime extras** — abort/cancellation plumbing (TS `AbortSignal` ⇄ tokio cancellation), provider-specific reasoning blocks, usage/cost normalization, provider fallbacks.
-8. **Console surfaces** — `packages` CLI, prompt templates, skills, `/skill:name`, image attachment previewing; `--image` load is ported but without preview tooling.
+1. **TUI** — transcript, tool cards, workspace widgets, diff/cache/conflicts views, approval modal, MCP elicitation/sampling prompts. (The Rust TUI will use crossterm/ratatui with the same feature set.)
+2. **Browser automation** — CDP session (launch/reconnect/tabs/eval/click/text/screenshot/close/shutdown) without Playwright.
+3. **MCP** — stdio + Streamable HTTP clients, OAuth persistence, elicitation/sampling, permission-gated `mcp__server__tool` calls.
+4. **Extensions/packages** — child-process extension host (custom tools, commands, providers, hooks), resource discovery, package install/update/remove, package settings layers.
+5. **Provider runtime extras** — abort/cancellation plumbing (TS `AbortSignal` ⇄ tokio cancellation), provider-specific reasoning blocks, usage/cost normalization, provider fallbacks.
+6. **Console surfaces** — `packages` CLI, prompt templates, skills, `/skill:name`, image attachment previewing; `--image` load is ported but without preview tooling.
 
 ## Deliberate differences
 

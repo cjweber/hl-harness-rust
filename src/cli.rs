@@ -217,13 +217,19 @@ async fn run_command(
     let initial_messages = session.messages()?;
     let images = load_images(&image_paths)?;
 
-    // Compaction persistence is wired through the shared session cell; compaction
-    // entry linkage (appendCompactionFromMessageIndex) is a later-port item.
     let session_cell = Arc::new(std::sync::Mutex::new(session));
+    let tokens_before = serde_json::to_string(&initial_messages).map(|text| text.len().div_ceil(4)).unwrap_or(0);
+    let compaction_session = session_cell.clone();
     let mut agent = Agent::new(
         crate_provider,
         builtin_tools(&config.cwd),
-        CompactionOptions::default(),
+        CompactionOptions {
+            on_compaction: Some(Box::new(move |summary, index| {
+                let mut store = compaction_session.lock().unwrap();
+                let _ = store.append_compaction_from_message_index(summary, index, tokens_before);
+            })),
+            ..CompactionOptions::default()
+        },
         None,
         max_steps,
         initial_messages,

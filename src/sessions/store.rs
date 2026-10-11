@@ -335,9 +335,18 @@ impl SessionStore {
         }))
     }
 
+    /// Port of `appendCompactionFromMessageIndex`.
+    pub fn append_compaction_from_message_index(&mut self, summary: &str, message_index: usize, tokens_before: usize) -> Result<String> {
+        let context = self.context_entries()?;
+        let message_entries: Vec<&Value> = context.iter().filter(|entry| entry["type"] == "message" && entry.get("message").is_some()).collect();
+        let index = message_index.min(message_entries.len());
+        let first_kept = if message_entries.is_empty() { None } else { message_entries.get(index).and_then(|entry| entry["id"].as_str()) };
+        self.append_compaction(summary, first_kept, tokens_before)
+    }
+
     pub fn append_branch_summary(&mut self, from_id: &str, summary: &str) -> Result<String> {
         if self.get_entry(from_id).is_none() {
-            bail!("Unknown branch summary source: {from_id}");
+            bail!("Unknown branch source: {from_id}");
         }
         self.append_entry(json!({"type": "branch_summary", "fromId": from_id, "summary": summary}))
     }

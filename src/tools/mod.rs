@@ -8,6 +8,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+pub mod runtime;
+pub mod sqlite;
+pub mod web;
+
 pub struct ToolContext {
     pub cwd: PathBuf,
 }
@@ -34,9 +38,9 @@ pub fn within(cwd: &Path, path: &str) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-const OUTPUT_LIMIT: usize = 20_000;
+pub(crate) const OUTPUT_LIMIT: usize = 20_000;
 
-fn clip(value: &str, limit: usize) -> String {
+pub(crate) fn clip(value: &str, limit: usize) -> String {
     if value.len() > limit {
         let mut end = limit;
         while !value.is_char_boundary(end) {
@@ -88,7 +92,7 @@ fn string_arg(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-async fn run_process(program: &str, args: &[&str], cwd: &Path, input: Option<&str>, timeout_ms: Option<u64>) -> Result<(Option<i32>, String)> {
+pub(crate) async fn run_process(program: &str, args: &[&str], cwd: &Path, input: Option<&str>, timeout_ms: Option<u64>) -> Result<(Option<i32>, String)> {
     let mut command = tokio::process::Command::new(program);
     command.args(args).current_dir(cwd).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     if input.is_some() {
@@ -668,8 +672,69 @@ mod tests {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// Web tool wrappers
+// ---------------------------------------------------------------------------
+
+pub struct WebSearchTool;
+
+#[async_trait]
+impl Tool for WebSearchTool {
+    fn declaration(&self) -> &ToolDeclaration {
+        static DECL: std::sync::OnceLock<ToolDeclaration> = std::sync::OnceLock::new();
+        DECL.get_or_init(|| ToolDeclaration {
+            name: "web_search".into(),
+            description: "Search the web and return titles, URLs, and snippets. Uses BRAVE_SEARCH_API_KEY when set, otherwise DuckDuckGo HTML.".into(),
+            parameters: json!({"type": "object", "properties": {"query": {"type": "string"}, "maxResults": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"], "additionalProperties": false}),
+        })
+    }
+
+    fn risk(&self) -> RiskLevel {
+        RiskLevel::Network
+    }
+
+    async fn execute(&self, args: &Value) -> Result<String> {
+        let query = args.get("query").and_then(Value::as_str).unwrap_or_default().to_string();
+        let max_results = args.get("maxResults").and_then(Value::as_u64).unwrap_or(5) as usize;
+        web::web_search(&query, max_results).await
+    }
+}
+
+pub struct WebFetchTool;
+
+#[async_trait]
+impl Tool for WebFetchTool {
+    fn declaration(&self) -> &ToolDeclaration {
+        static DECL: std::sync::OnceLock<ToolDeclaration> = std::sync::OnceLock::new();
+        DECL.get_or_init(|| ToolDeclaration {
+            name: "web_fetch".into(),
+            description: "Fetch an HTTP(S) URL and return its text or JSON response.".into(),
+            parameters: json!({"type": "object", "properties": {"url": {"type": "string"}, "maxBytes": {"type": "integer", "minimum": 1}}, "required": ["url"], "additionalProperties": false}),
+        })
+    }
+
+    fn risk(&self) -> RiskLevel {
+        RiskLevel::Network
+    }
+
+    async fn execute(&self, args: &Value) -> Result<String> {
+        let url = args.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
+        let max_bytes = args.get("maxBytes").and_then(Value::as_u64).unwrap_or(100_000) as usize;
+        web::web_fetch(&url, max_bytes).await
+    }
+}
+
+/// Alias kept for tests; identical to `create_tools`.
 pub fn builtin_tools(cwd: &Path) -> Vec<std::sync::Arc<dyn Tool>> {
-    vec![
+    create_tools(cwd)
+}
+
+/// Full tool set with shared runtime state, mirroring the TS `createTools()`.
+pub fn create_tools(cwd: &Path) -> Vec<std::sync::Arc<dyn Tool>> {
+    static RUNTIME: std::sync::OnceLock<runtime::Runtime> = std::sync::OnceLock::new();
+    let runtime = RUNTIME.get_or_init(runtime::Runtime::default);
+    let mut tools: Vec<std::sync::Arc<dyn Tool>> = vec![
         std::sync::Arc::new(ReadTool::new(cwd)),
         std::sync::Arc::new(WriteTool::new(cwd)),
         std::sync::Arc::new(EditTool::new(cwd)),
@@ -686,5 +751,11 @@ pub fn builtin_tools(cwd: &Path) -> Vec<std::sync::Arc<dyn Tool>> {
         std::sync::Arc::new(GitApplyCheckTool::new(cwd)),
         std::sync::Arc::new(GitApplyTool::new(cwd)),
         std::sync::Arc::new(GitConflictsTool::new(cwd)),
-    ]
+        std::sync::Arc::new(WebSearchTool),
+        std::sync::Arc::new(WebFetchTool),
+        std::sync::Arc::new(sqlite::DatabaseQueryTool { cwd: cwd.to_path_buf() }),
+        std::sync::Arc::new(sqlite::DatabaseExecuteTool { cwd: cwd.to_path_buf() }),
+    ];
+    tools.extend(runtime.tools(cwd));
+    tools
 }

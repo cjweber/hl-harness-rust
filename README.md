@@ -9,13 +9,13 @@ Phase 1 of the port — the non-interactive core — is implemented and tested:
 - **Core loop** (`src/core/agent.rs`): multi-step tool loop, assistant deltas, tool calls/results, usage propagation, cache-plan events, model-driven compaction with deterministic fallback, max-step limits.
 - **Providers** (`src/model/`): OpenAI-compatible SSE streaming (OpenRouter, OpenCode Go, custom endpoints) and native Anthropic Messages streaming, with retry/backoff, timeouts, session-affinity headers (`x-opencode-session`), attribution headers, image data-URL/Anthropic base64 encoding, and model discovery.
 - **Cache planning** (`src/cache/prefix.rs`): deterministic canonical serialization and SHA-256 prefix hashes byte-identical with TypeScript (verified by test).
-- **Sessions** (`src/sessions/store.rs`): Pi JSONL v3 — headers, parent/leaf branching, context edits, compaction, custom entries, unknown-entry preservation, active-context projection, resume via `--session`.
-- **Tools** (`src/tools/`): `read`, `write`, `edit`, `ls`, `find`, `grep`, `ripgrep`, `bash`, `json_get`, `json_edit`, `git_status`, `git_diff`, `git_log`, `git_apply_check`, `git_apply`, `git_conflicts` — project-confined paths, bounded outputs, conflict-marker reporting.
+- **Sessions** (`src/sessions/store.rs`): Pi JSONL v3 — headers, parent/leaf branching, context edits, compaction (including `appendCompactionFromMessageIndex`, wired into the CLI), custom entries, unknown-entry preservation, active-context projection, resume via `--session`.
+- **Tools** (`src/tools/`): `read`, `write`, `edit`, `ls`, `find`, `grep`, `ripgrep`, `bash`, background jobs (`bash_background`/`bash_job`/`bash_cancel`), persistent shells (`bash_session*`), `bash_sandbox` (macOS `sandbox-exec` / Linux bubblewrap), `watch_start/changes/stop`, `json_get`, `json_edit`, `web_search`, `web_fetch` (private-host blocking), `database_query`/`database_execute` (SQLite), `git_status`, `git_diff`, `git_log`, `git_apply_check`, `git_apply`, `git_conflicts` — project-confined paths, bounded outputs, conflict-marker reporting.
 - **Permissions** (`src/security/permissions.rs`): modes (`read-only`/`ask`/`full`), scoped rules in `~/.pi/agent/permissions.json`, always-allow, audit records; noninteractive default denies unsafe operations.
 - **Settings hierarchy** (`src/config.rs`): project `.harness/settings.json` > `~/.pi/agent/harness-settings.json` > project `.pi/settings.json` > `~/.pi/agent/settings.json`, with CLI flags and environment above all file layers (same precedence as the TS CLI).
 - **Trust** (`src/config.rs`): `trust status|list|grant|revoke` with project fingerprints.
 
-Run `cargo test` for 11 unit + 6 integration tests (SSE transport is exercised over a real local TCP mock server; no network or keys required).
+Run `cargo test` for 13 unit + 12 integration tests (SSE transport is exercised over a real local TCP mock server; no network or keys required).
 
 ## Usage
 
