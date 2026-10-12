@@ -1,7 +1,7 @@
 //! Integration tests: TS-hash parity, SSE transport against a local mock server,
 //! and the full agent tool loop with a scripted mock provider.
 
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use hl_harness::cache::prefix::{create_cache_plan, CachePrefix};
 use hl_harness::core::agent::{Agent, CompactionOptions};
 use hl_harness::model::provider::{OpenAICompatibleProvider, Provider, ProviderConfig, ProviderEvent, ProviderKind, ProviderRequest};
@@ -333,4 +333,198 @@ async fn session_records_compaction_entry_from_message_index() {
     let compaction = entries.iter().find(|entry| entry["type"] == "compaction").unwrap();
     assert_eq!(compaction["firstKeptEntryId"], entries[1]["id"]);
     std::env::remove_var("HOME");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: browser CDP against a mock CDP endpoint (HTTP /json/list + a separate
+// WebSocket host serving simulated CDP)
+// ---------------------------------------------------------------------------
+
+use hl_harness::types::ToolDeclaration;
+
+fn base64_encode_of(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let bits = (b0 << 16) | (b1 << 8) | b2;
+        output.push(ALPHABET[(bits >> 18) as usize & 63] as char);
+        output.push(ALPHABET[(bits >> 12) as usize & 63] as char);
+        output.push(if chunk.len() > 1 { ALPHABET[(bits >> 6) as usize & 63] as char } else { '=' });
+        output.push(if chunk.len() > 2 { ALPHABET[bits as usize & 63] as char } else { '=' });
+    }
+    output
+}
+
+fn base64_of_png() -> Vec<u8> {
+    b"PNG-PAYLOAD".to_vec()
+}
+
+/// One shared CDP fixture: parallel tests would otherwise race on the env var.
+/// The mock servers live for the process duration.
+fn cdp_base_url() -> String {
+    static FIXTURE: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    let port = *FIXTURE.get_or_init(spawn_cdp_fixture);
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Run the mock CDP servers on an isolated current-thread runtime in a detached
+/// thread; the test binary exits before this thread ever does.
+fn spawn_cdp_fixture() -> u16 {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let ws = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let http_port = http.local_addr().unwrap().port();
+            let ws_port = ws.local_addr().unwrap().port();
+
+            tokio::spawn(async move {
+                loop {
+                    let (mut socket, _) = http.accept().await.unwrap();
+                    let mut buffer = vec![0u8; 65536];
+                    let mut raw = Vec::new();
+                    loop {
+                        let read = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await.unwrap();
+                        raw.extend_from_slice(&buffer[..read]);
+                        if String::from_utf8_lossy(&raw).contains("\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let targets = json!([{"id": "page-1", "type": "page", "title": "Test", "url": "about:blank", "webSocketDebuggerUrl": format!("ws://127.0.0.1:{ws_port}/devtools/page/page-1")}]);
+                    let body = serde_json::to_string(&targets).unwrap();
+                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}", body.len(), body);
+                    tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await.unwrap();
+                }
+            });
+
+            tokio::spawn(async move {
+                loop {
+                    let (socket, _) = ws.accept().await.unwrap();
+                    tokio::spawn(async move {
+                        let Ok(mut ws) = tokio_tungstenite::accept_async(socket).await else { return };
+                        while let Some(Ok(message)) = ws.next().await {
+                            let tokio_tungstenite::tungstenite::Message::Text(text) = message else { continue };
+                            let Ok(value) = serde_json::from_str::<Value>(&text) else { continue };
+                            let id = value["id"].as_u64().unwrap_or(0);
+                            let result = match value["method"].as_str() {
+                                Some("Runtime.evaluate") => {
+                                    let expression = value["params"]["expression"].as_str().unwrap_or_default();
+                                    if expression.contains("document.body?.innerText") {
+                                        json!({"result": {"value": "page body text"}})
+                                    } else if expression.contains("element.click()") {
+                                        json!({"result": {"value": expression.contains("#button")}})
+                                    } else {
+                                        json!({"result": {"value": {"answered": true}}})
+                                    }
+                                }
+                                Some("Page.captureScreenshot") => json!({"data": base64_encode_of(&base64_of_png())}),
+                                _ => json!({}),
+                            };
+                            let reply = json!({"id": id, "result": result}).to_string();
+                            if ws.send(tokio_tungstenite::tungstenite::Message::Text(reply)).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+
+            let _ = send.send(http_port);
+            // Keep the runtime alive forever so the spawned loops keep running.
+            futures_util::future::pending::<()>().await;
+        });
+    });
+    receive.recv().unwrap()
+}
+
+#[tokio::test]
+async fn browser_cdp_tool_chain_against_mock() {
+    std::env::set_var("HARNESS_CDP_URL", cdp_base_url());
+    let root = tempfile_dir();
+    let tools = create_tools(&root);
+    let named = |name: &str| tools.iter().find(|tool| tool.declaration().name == name).unwrap().clone();
+
+    let result = named("browser_open").execute(&args_from(json!({"url": "https://example.test/"}))).await.unwrap();
+    assert_eq!("Browser connected", result);
+
+    let result = named("browser_eval").execute(&args_from(json!({"expression": "1 + 1"}))).await.unwrap();
+    assert!(result.contains("answered"), "{result}");
+
+    let result = named("browser_text").execute(&args_from(json!({}))).await.unwrap();
+    assert_eq!("page body text", result);
+
+    let result = named("browser_click").execute(&args_from(json!({"selector": "#button"}))).await.unwrap();
+    assert_eq!("Clicked #button", result);
+    let miss = named("browser_click").execute(&args_from(json!({"selector": "#nothing"}))).await.unwrap_err().to_string();
+    assert_eq!("No clickable element matched #nothing", miss);
+
+    let result = named("browser_screenshot").execute(&args_from(json!({"path": "shots/page.png"}))).await.unwrap();
+    assert_eq!("Wrote shots/page.png", result);
+    let written = std::fs::read(root.join("shots/page.png")).unwrap();
+    assert_eq!(written, b"PNG-PAYLOAD".to_vec());
+
+    let result = named("browser_tabs").execute(&args_from(json!({}))).await.unwrap();
+    assert!(result.contains("page-1"), "{result}");
+
+    assert_eq!("Browser reconnected", named("browser_reconnect").execute(&args_from(json!({}))).await.unwrap());
+    assert_eq!("Browser disconnected", named("browser_close").execute(&args_from(json!({}))).await.unwrap());
+
+    let error = named("browser_eval").execute(&args_from(json!({"expression": "1"}))).await.unwrap_err().to_string();
+    assert!(error.contains("No browser session"), "{error}");
+    assert_eq!("Browser connected", named("browser_open").execute(&args_from(json!({}))).await.unwrap());
+
+    let select = named("browser_select");
+    let error = select.execute(&args_from(json!({"id": ""}))).await.unwrap_err().to_string();
+    assert_eq!("browser_select requires an id", error);
+    assert_eq!("Selected page page-1", select.execute(&args_from(json!({"id": "page-1"}))).await.unwrap());
+
+    assert_eq!("Browser shut down", named("browser_shutdown").execute(&args_from(json!({}))).await.unwrap());
+}
+
+#[tokio::test]
+async fn browser_e2e_real_chrome() {
+    if std::env::var("HARNESS_BROWSER_E2E").as_deref() != Ok("1") {
+        eprintln!("skipping real browser e2e (set HARNESS_BROWSER_E2E=1)");
+        return;
+    }
+    std::env::set_var("HARNESS_BROWSER_HEADLESS", "1");
+    let root = tempfile_dir();
+    let tools = create_tools(&root);
+    let named = |name: &str| tools.iter().find(|tool| tool.declaration().name == name).unwrap().clone();
+    let launched = named("browser_launch").execute(&args_from(json!({}))).await.expect("browser_launch");
+    assert!(launched.contains("Launched browser"), "{launched}");
+    let page = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let page_port = page.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = page.accept().await.unwrap();
+        let mut buffer = vec![0u8; 65536];
+        let mut raw = Vec::new();
+        loop {
+            let read = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await.unwrap();
+            raw.extend_from_slice(&buffer[..read]);
+            if String::from_utf8_lossy(&raw).contains("\r\n\r\n") {
+                break;
+            }
+        }
+        let body = "<button id=b>ok</button><span id=t>hello</span>";
+        let response = format!("HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), body);
+        tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await.unwrap();
+    });
+    let url = format!("http://127.0.0.1:{page_port}/");
+    named("browser_open").execute(&args_from(json!({"url": url.clone()}))).await.unwrap_or_else(|error| panic!("browser_open: {error}"));
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let text = named("browser_text").execute(&args_from(json!({}))).await.unwrap();
+    assert!(text.contains("hello"), "{text}");
+    let clicked = named("browser_click").execute(&args_from(json!({"selector": "#b"}))).await.unwrap();
+    assert_eq!("Clicked #b", clicked);
+    let tabs = named("browser_tabs").execute(&args_from(json!({}))).await.unwrap();
+    assert!(tabs.contains(&format!("{page_port}")), "{tabs}");
+    server.abort();
+    named("browser_screenshot").execute(&args_from(json!({"path": "shots/real.png"}))).await.unwrap();
+    assert!(root.join("shots/real.png").exists());
+    named("browser_shutdown").execute(&args_from(json!({}))).await.unwrap();
+    std::env::remove_var("HARNESS_BROWSER_HEADLESS");
 }

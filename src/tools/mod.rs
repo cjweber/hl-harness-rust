@@ -8,6 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+pub mod browser;
 pub mod runtime;
 pub mod sqlite;
 pub mod web;

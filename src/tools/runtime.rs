@@ -494,7 +494,7 @@ impl Tool for BashSandboxTool {
     }
 }
 
-fn executable_on_path(name: &str) -> Option<PathBuf> {
+pub fn executable_on_path(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         return if Path::new(name).exists() { Some(PathBuf::from(name)) } else { None };
     }
@@ -510,17 +510,20 @@ pub struct Runtime {
     pub jobs: Arc<JobRegistry>,
     pub shells: Arc<ShellRegistry>,
     pub watches: Arc<WatchRegistry>,
+    pub browser: crate::tools::browser::BrowserRegistry,
 }
 
 impl Runtime {
     pub fn tools(&self, cwd: &Path) -> Vec<Arc<dyn Tool>> {
-        vec![
+        let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(BashBackgroundTool { cwd: cwd.to_path_buf(), jobs: self.jobs.clone() }),
             Arc::new(BashJobTool { jobs: self.jobs.clone() }),
             Arc::new(BashCancelTool { jobs: self.jobs.clone() }),
             Arc::new(BashSessionTool { cwd: cwd.to_path_buf(), shells: self.shells.clone() }),
             Arc::new(BashSessionCloseTool { shells: self.shells.clone() }),
             Arc::new(BashSandboxTool { cwd: cwd.to_path_buf() }),
-        ]
+        ];
+        tools.extend(self.browser.tools(cwd));
+        tools
     }
 }

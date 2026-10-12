@@ -15,7 +15,7 @@ Phase 1 of the port — the non-interactive core — is implemented and tested:
 - **Settings hierarchy** (`src/config.rs`): project `.harness/settings.json` > `~/.pi/agent/harness-settings.json` > project `.pi/settings.json` > `~/.pi/agent/settings.json`, with CLI flags and environment above all file layers (same precedence as the TS CLI).
 - **Trust** (`src/config.rs`): `trust status|list|grant|revoke` with project fingerprints.
 
-Run `cargo test` for 13 unit + 12 integration tests (SSE transport is exercised over a real local TCP mock server; no network or keys required).
+Run `cargo test` for 13 unit + 14 integration tests (the real-browser e2e is opt-in with `HARNESS_BROWSER_E2E=1`) (SSE transport is exercised over a real local TCP mock server; no network or keys required).
 
 ## Usage
 

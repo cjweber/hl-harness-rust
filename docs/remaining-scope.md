@@ -12,6 +12,10 @@ The Rust crate mirrors the TypeScript harness functionally. This file tracks wha
 - Permission gate: modes, scoped rules (tool/risk/server), always-allow, audit; noninteractive default deny; `--yes`/`--permission-mode`.
 - Four-layer settings hierarchy with flag/env/hl-harness/Pi precedence; `settings` command; `trust status|list|grant|revoke`; `cache` inspection; `models` discovery; `run --json` event stream.
 
+## Ported (phase 3, in addition to phase 2)
+
+- Browser automation over CDP without Playwright (`tokio-tungstenite`): `browser_launch` (persistent profile `~/.pi/agent/browser-profile`, candidate discovery incl. `HARNESS_BROWSER_COMMAND`), `browser_reconnect`, `browser_tabs`, `browser_select`, `browser_open` (http(s)-only navigation), `browser_eval`, `browser_click`, `browser_text`, `browser_screenshot` (project-local PNG), `browser_close`, `browser_shutdown`. Tested against a mock CDP endpoint (HTTP /json/list + simulated WebSocket CDP commands) plus an opt-in real-Chrome e2e (`HARNESS_BROWSER_E2E=1`, headless via `HARNESS_BROWSER_HEADLESS=1`).
+
 ## Ported (phase 2, in addition to phase 1)
 
 - `web_search` (Brave key or DuckDuckGo HTML parsing) and `web_fetch` with literal private/local host blocking (unit-tested against the TS host list).
@@ -24,8 +28,7 @@ The Rust crate mirrors the TypeScript harness functionally. This file tracks wha
 ## Not ported yet (in functional order)
 
 1. **TUI** — transcript, tool cards, workspace widgets, diff/cache/conflicts views, approval modal, MCP elicitation/sampling prompts. (The Rust TUI will use crossterm/ratatui with the same feature set.)
-2. **Browser automation** — CDP session (launch/reconnect/tabs/eval/click/text/screenshot/close/shutdown) without Playwright.
-3. **MCP** — stdio + Streamable HTTP clients, OAuth persistence, elicitation/sampling, permission-gated `mcp__server__tool` calls.
+2. **MCP** — stdio + Streamable HTTP clients, OAuth persistence, elicitation/sampling, permission-gated `mcp__server__tool` calls.
 4. **Extensions/packages** — child-process extension host (custom tools, commands, providers, hooks), resource discovery, package install/update/remove, package settings layers.
 5. **Provider runtime extras** — abort/cancellation plumbing (TS `AbortSignal` ⇄ tokio cancellation), provider-specific reasoning blocks, usage/cost normalization, provider fallbacks.
 6. **Console surfaces** — `packages` CLI, prompt templates, skills, `/skill:name`, image attachment previewing; `--image` load is ported but without preview tooling.
