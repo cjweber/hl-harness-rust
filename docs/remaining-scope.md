@@ -12,6 +12,15 @@ The Rust crate mirrors the TypeScript harness functionally. This file tracks wha
 - Permission gate: modes, scoped rules (tool/risk/server), always-allow, audit; noninteractive default deny; `--yes`/`--permission-mode`.
 - Four-layer settings hierarchy with flag/env/hl-harness/Pi precedence; `settings` command; `trust status|list|grant|revoke`; `cache` inspection; `models` discovery; `run --json` event stream.
 
+## Ported (phase 4, in addition to phase 3)
+
+- MCP client implemented directly on the MCP 2024-11-05 JSON-RPC protocol (no Rust SDK dependency): stdio transport (spawn + newline JSON-RPC, writer serialization, server→client requests answered through an interaction surface, notifications) and Streamable HTTP transport (POST request/response, JSON + SSE bodies, `mcp-session-id` handling, bearer tokens).
+- `tools/list`/`tools/call` exposed as `mcp__<server>__<tool>` with sanitized names, `[server]`-prefixed descriptions, and isError→error conversion (tested against a real Python stdio MCP server).
+- `resources/list|read`, `prompts/list|get`.
+- OAuth: RFC 8414 metadata discovery, PKCE S256, authorization URL construction on 401, `finishAuth` token exchange, token + verifier files persisted at mode 0600.
+- Manager: `connect` with operation approval (tool `mcp:<name>`, risk `mcp`), gating identical to the TS harness; `mcp list|add|remove` CLI with trust gating and OAuth flags; `run --mcp <name>` connects through the permission gate.
+- Interaction surface: non-interactive runs decline elicitation/sampling; capability advertisement is conditional in the protocol payload.
+
 ## Ported (phase 3, in addition to phase 2)
 
 - Browser automation over CDP without Playwright (`tokio-tungstenite`): `browser_launch` (persistent profile `~/.pi/agent/browser-profile`, candidate discovery incl. `HARNESS_BROWSER_COMMAND`), `browser_reconnect`, `browser_tabs`, `browser_select`, `browser_open` (http(s)-only navigation), `browser_eval`, `browser_click`, `browser_text`, `browser_screenshot` (project-local PNG), `browser_close`, `browser_shutdown`. Tested against a mock CDP endpoint (HTTP /json/list + simulated WebSocket CDP commands) plus an opt-in real-Chrome e2e (`HARNESS_BROWSER_E2E=1`, headless via `HARNESS_BROWSER_HEADLESS=1`).

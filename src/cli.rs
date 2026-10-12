@@ -5,6 +5,7 @@ use crate::core::agent::{Agent, CompactionOptions};
 use crate::model::discovery::discover_models;
 use crate::model::factory::{provider_config, ProviderId, ProviderOptions};
 use crate::security::permissions::{ApprovalResult, GatePolicy, PermissionMode, SharedGatePolicy};
+use crate::mcp::client::{load_mcp_servers, add_mcp_server, remove_mcp_server, save_mcp_servers, sanitize_mcp_name, McpManager, McpOAuthConfig, McpServerConfig, McpTool};
 use crate::sessions::store::SessionStore;
 use crate::tools::builtin_tools;
 use crate::types::{HarnessEvent, ImageAttachment, Message};
@@ -52,6 +53,13 @@ pub enum Commands {
         timeout: u64,
         #[arg(long, default_value_t = 2)]
         retries: u32,
+        /// Connect a configured MCP server; may be repeated.
+        #[arg(long = "mcp")]
+        mcp_servers: Vec<String>,
+        #[arg(long)]
+        allow_tool: Vec<String>,
+        #[arg(long)]
+        allow_risk: Vec<String>,
     },
     /// Interactive TUI (not yet ported; see docs/remaining-scope.md).
     Tui,
@@ -74,6 +82,15 @@ pub enum Commands {
         action: String,
         #[arg(default_value = None)]
         path: Option<PathBuf>,
+    },
+    Mcp {
+        #[arg(default_value = "list")]
+        action: String,
+        #[arg(default_value = None)]
+        name: Option<String>,
+        /// Remaining flags (--project/--command/--args/--url/--oauth-*)
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        extra: Vec<String>,
     },
     /// Inspect persisted per-request cache history from a session file.
     Cache {
@@ -186,6 +203,9 @@ async fn run_command(
     json_mode: bool,
     timeout: u64,
     retries: u32,
+    mcp_servers: Vec<String>,
+    allow_tool: Vec<String>,
+    allow_risk: Vec<String>,
 ) -> Result<i32> {
     let config = default_config(&std::env::current_dir()?, &home_dir());
     let (_, mut options) = apply_settings(provider.as_deref(), model.clone(), endpoint.clone(), api_key_env.clone())?;
@@ -220,9 +240,18 @@ async fn run_command(
     let session_cell = Arc::new(std::sync::Mutex::new(session));
     let tokens_before = serde_json::to_string(&initial_messages).map(|text| text.len().div_ceil(4)).unwrap_or(0);
     let compaction_session = session_cell.clone();
+    let mut tools: Vec<Arc<dyn crate::tools::Tool>> = builtin_tools(&config.cwd);
+    let mcp_manager = if !mcp_servers.is_empty() { Some(connect_mcp_manager(&mcp_servers, &policy).await?) } else { None };
+    if let Some(manager) = &mcp_manager {
+        for name in manager.tool_names() {
+            if let Some(entry) = manager.get_tool(&name) {
+                tools.push(Arc::new(McpTool { entry }));
+            }
+        }
+    }
     let mut agent = Agent::new(
         crate_provider,
-        builtin_tools(&config.cwd),
+        tools,
         CompactionOptions {
             on_compaction: Some(Box::new(move |summary, index| {
                 let mut store = compaction_session.lock().unwrap();
@@ -265,6 +294,125 @@ async fn run_command(
     result.map(|_| 0)
 }
 
+
+impl McpServerConfig {
+    fn describe(&self) -> String {
+        self.command.clone().or_else(|| self.url.clone()).unwrap_or_default()
+    }
+
+    fn enabled_label(&self) -> &'static str {
+        if self.enabled == Some(false) { "disabled" } else { "enabled" }
+    }
+}
+
+async fn mcp_command(args: &[String]) -> Result<i32> {
+    let config = default_config(&std::env::current_dir()?, &home_dir());
+    let project = args.iter().any(|arg| arg.as_str() == "--project");
+    if project && !is_project_trusted(&config.cwd, &config.pi_config_dir) {
+        bail!("Project is not trusted; run `hl-harness trust` first");
+    }
+    let action = args.first().map(String::as_str).unwrap_or("list");
+    let rest: Vec<String> = args.iter().skip(1).cloned().collect();
+    match action {
+        "list" => {
+            let servers = load_mcp_servers(&config.cwd, &config.pi_config_dir, is_project_trusted(&config.cwd, &config.pi_config_dir))?;
+            for (name, server) in servers {
+                println!("{name}\t{}\t{}", server.enabled_label(), server.describe());
+            }
+            Ok(0)
+        }
+        "add" => {
+            let Some(name) = rest.first().cloned() else { bail!("mcp add requires a name") };
+            let flag = |flag: &str| rest.iter().position(|arg| arg.as_str() == flag).and_then(|index| rest.get(index + 1)).cloned();
+            let oauth_value2 = |flag_value: &str| rest.iter().position(|arg| arg.as_str() == flag_value).and_then(|index| rest.get(index + 1)).cloned();
+    let oauth_value = oauth_value2;
+            let oauth_client_id = oauth_value2("--oauth-client-id");
+            let oauth_secret_env = oauth_value("--oauth-client-secret-env");
+            let oauth_redirect_uri = oauth_value("--oauth-redirect-uri");
+            let oauth_scope = oauth_value("--oauth-scope");
+            let oauth_secret = oauth_secret_env.clone().and_then(|env| std::env::var(env).ok());
+            let oauth = oauth_client_id.clone().map(|client_id| McpOAuthConfig {
+                client_id,
+                client_secret: oauth_secret,
+                redirect_uri: oauth_redirect_uri,
+                scope: oauth_scope,
+                token_file: None,
+            });
+            let command_value = oauth_value("--command");
+            let url_value = oauth_value("--url");
+            let command_index = rest.iter().position(|arg| arg.as_str() == "--command");
+            let url_index = rest.iter().position(|arg| arg.as_str() == "--url");
+            let start = command_index.map(|index| index + 2).unwrap_or(0);
+            let stop = url_index.unwrap_or(rest.len());
+            let raw_args: Vec<String> = if command_index.is_some() && start <= stop {
+                rest[start..stop].iter().filter(|value| !matches!(value.as_str(), "--command" | "--url" | "--args")).cloned().collect::<Vec<String>>()
+            } else {
+                Vec::new()
+            };
+            let command_args = raw_args.iter().position(|arg| arg == "--args").map(|index| raw_args[index + 1..].to_vec()).unwrap_or_else(|| raw_args.clone());
+            let server = McpServerConfig {
+                command: command_value,
+                args: if !command_args.is_empty() { Some(command_args) } else { None },
+                url: url_value,
+                oauth,
+                env: None,
+                headers: None,
+                enabled: None,
+            };
+            let has_command = command_index.is_some();
+            let has_url = url_index.is_some();
+            if oauth_client_id.is_some() && !has_command && !has_url {
+                bail!("MCP OAuth requires --url");
+            }
+            println!("{}", add_mcp_server(&config.cwd, &config.pi_config_dir, project, &name, server)?);
+            Ok(0)
+        }
+        "remove" => {
+            let Some(name) = rest.first().cloned() else { bail!("mcp remove requires a name") };
+            println!("{}", if remove_mcp_server(&config.cwd, &config.pi_config_dir, project, &name)? { "removed" } else { "not found" });
+            Ok(0)
+        }
+        other => bail!("Unknown mcp action: {other}"),
+    }
+}
+
+/// Non-interactive MCP interactions decline server requests (matching the TS
+/// behavior when no handlers are configured).
+struct DecliningInteractions;
+
+impl crate::mcp::client::McpInteractions for DecliningInteractions {
+    fn elicit(&self, _request: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value>> + Send>> {
+        Box::pin(async { Ok(serde_json::json!({"action": "decline"})) })
+    }
+    fn sample(&self, _request: serde_json::Value) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<serde_json::Value>> + Send>> {
+        Box::pin(async { Err(anyhow::anyhow!("sampling is declined in non-interactive run mode")) })
+    }
+}
+
+async fn mcp_connect_selected(manager: &McpManager, names: &[String], policy: &GatePolicy) -> Result<()> {
+    let approve: std::sync::Arc<crate::mcp::client::ApproveFn> = std::sync::Arc::new({
+        let policy = policy.clone();
+        move |request| {
+            let policy = policy.clone();
+            Box::pin(async move {
+                let audit = policy.authorize(&request);
+                ApprovalResult { decision: audit.decision, remember: false }
+            })
+        }
+    });
+    for name in names {
+        manager.connect(name, Some(approve.as_ref())).await?;
+    }
+    Ok(())
+}
+
+pub async fn connect_mcp_manager(names: &[String], policy: &GatePolicy) -> Result<McpManager> {
+    let config = default_config(&std::env::current_dir()?, &home_dir());
+    let servers = load_mcp_servers(&config.cwd, &config.pi_config_dir, is_project_trusted(&config.cwd, &config.pi_config_dir))?;
+    let manager = McpManager::new(&config.cwd, servers, None);
+    mcp_connect_selected(&manager, names, policy).await?;
+    Ok(manager)
+}
 async fn models_command(provider: Option<String>, model: Option<String>, endpoint: Option<String>, api_key_env: Option<String>, timeout: Option<u64>, retries: u32) -> Result<i32> {
     let (_, options) = apply_settings(provider.as_deref(), model, endpoint, api_key_env)?;
     let options = ProviderOptions { timeout_ms: timeout, max_retries: Some(retries), ..options };
@@ -289,8 +437,8 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             println!("{VERSION}");
             Ok(0)
         }
-        Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries }) => {
-            run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries).await
+        Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, allow_tool, allow_risk }) => {
+            run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, allow_tool, allow_risk).await
         }
         Some(Commands::Tui) => Err(anyhow::anyhow!("The TUI is not ported yet; use `run` (see docs/remaining-scope.md)")),
         Some(Commands::Models { provider, model, endpoint, api_key_env, timeout, retries }) => models_command(provider, model, endpoint, api_key_env, timeout, retries).await,
@@ -347,6 +495,14 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             }
         },
         None => Err(anyhow::anyhow!("Unknown command")),
+        Some(Commands::Mcp { action, name, extra }) => {
+            let mut all_args = vec![action.clone()];
+            if let Some(name) = name {
+                all_args.push(name.clone());
+            }
+            all_args.extend(extra.clone());
+            mcp_command(&all_args).await
+        }
         Some(Commands::Cache { session, json }) => {
             let store = SessionStore::open(&session)?;
             let entries = store.all_cache_entries();
