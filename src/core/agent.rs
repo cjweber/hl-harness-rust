@@ -54,6 +54,7 @@ struct PendingCall {
 
 pub struct Agent {
     provider: SharedProvider,
+    observer: Option<Arc<dyn crate::extensions::AgentObserver>>,
     tools: Vec<Arc<dyn Tool>>,
     compaction: CompactionOptions,
     system_prompt: String,
@@ -66,6 +67,7 @@ pub struct Agent {
 const DEFAULT_SUMMARY_PROMPT: &str = "Summarize the conversation for another coding agent. Preserve goals, decisions, changed files, commands, test results, unresolved problems, and next steps. Be concise and factual. Output only the summary.";
 
 impl Agent {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         provider: SharedProvider,
         tools: Vec<Arc<dyn Tool>>,
@@ -74,9 +76,11 @@ impl Agent {
         max_steps: usize,
         initial_messages: Vec<Message>,
         approve_operation: Option<Box<ApproveFn>>,
+        observer: Option<Arc<dyn crate::extensions::AgentObserver>>,
     ) -> Self {
         Self {
             provider,
+            observer,
             tools,
             compaction,
             system_prompt: system_prompt.unwrap_or_else(|| "You are a helpful coding agent.".to_string()),
@@ -295,7 +299,34 @@ impl Agent {
                             bail!("Operation denied by user: {}", call.name);
                         }
                     }
-                    tool.execute(&Value::Object(call.arguments.clone())).await
+                    let mut effective_args = call.arguments.clone();
+                    if let Some(observer) = &self.observer {
+                        let hook = observer.before_tool(&call).await.unwrap_or(Value::Object(serde_json::Map::new()));
+                        if hook.get("block").and_then(Value::as_bool).unwrap_or(false) {
+                            let reason = hook["reason"].as_str().map(str::to_string).unwrap_or_else(|| format!("Operation blocked by extension: {}", tool.declaration().name));
+                            bail!("{reason}");
+                        }
+                        if let Some(Value::Object(args)) = hook.get("args") {
+                            effective_args = args.clone();
+                        }
+                    }
+                    let output = tool.execute(&Value::Object(effective_args.clone())).await;
+                    if let Some(observer) = &self.observer {
+                        let error_state = output.is_err();
+                        let text = match &output {
+                            Ok(value) => value.clone(),
+                            Err(error) => format!("{error}"),
+                        };
+                        let transformed = observer.after_tool(&call, &text, error_state).await.ok().flatten();
+                        if let Some(transformed) = transformed.filter(|value| !value.is_empty()) {
+                            if output.is_ok() {
+                                return Ok(transformed);
+                            } else {
+                                return Ok(transformed);
+                            }
+                        }
+                    }
+                    output
                 }
                 .await;
                 match result {

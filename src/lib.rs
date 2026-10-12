@@ -3,6 +3,7 @@ pub mod cli;
 pub mod cli_tui;
 pub mod config;
 pub mod core;
+pub mod extensions;
 pub mod mcp;
 pub mod model;
 pub mod security;

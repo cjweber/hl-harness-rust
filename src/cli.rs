@@ -9,7 +9,7 @@ use crate::mcp::client::{load_mcp_servers, add_mcp_server, remove_mcp_server, sa
 use crate::sessions::store::SessionStore;
 use crate::tools::builtin_tools;
 use crate::types::{HarnessEvent, ImageAttachment, Message};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -56,6 +56,9 @@ pub enum Commands {
         /// Connect a configured MCP server; may be repeated.
         #[arg(long = "mcp")]
         mcp_servers: Vec<String>,
+        /// Use a provider registered by an extension.
+        #[arg(long = "extension-provider")]
+        extension_provider: Option<String>,
         #[arg(long)]
         allow_tool: Vec<String>,
         #[arg(long)]
@@ -192,6 +195,36 @@ fn print_event(event: &HarnessEvent, json_mode: bool) {
     }
 }
 
+/// Select an extension-registered provider or fall back to the standard one.
+fn resolve_extension_provider(
+    selected: Option<&str>,
+    extension_host: Option<&Arc<crate::extensions::ExtensionHost>>,
+    api_key: Option<String>,
+) -> anyhow::Result<Arc<dyn crate::model::provider::Provider>> {
+    let Some(extension_host) = extension_host else {
+        bail!("Extension host is not running; load an extensions/ directory first");
+    };
+    let Some(selected) = selected else {
+        bail!("No --extension-provider selected");
+    };
+    let provider = extension_host
+        .provider_list()
+        .into_iter()
+        .find(|provider| provider.id == selected)
+        .ok_or_else(|| anyhow!("Unknown extension provider: {selected}"))?;
+    let api_key = api_key.or_else(|| {
+        provider.api_key_env.as_ref().and_then(|env| std::env::var(env).ok().filter(|value| !value.is_empty()))
+    });
+    crate::model::factory::create_provider(&ProviderOptions {
+        provider: Some(ProviderId::Custom),
+        model: Some(provider.model.clone()),
+        endpoint: Some(provider.base_url.clone()),
+        api_key,
+        headers: provider.headers.clone(),
+        ..ProviderOptions::new()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_command(
     prompt: String,
@@ -208,6 +241,7 @@ async fn run_command(
     timeout: u64,
     retries: u32,
     mcp_servers: Vec<String>,
+    extension_provider: Option<String>,
     allow_tool: Vec<String>,
     allow_risk: Vec<String>,
 ) -> Result<i32> {
@@ -216,6 +250,7 @@ async fn run_command(
     options.timeout_ms = Some(timeout);
     options.max_retries = Some(retries);
     let crate_provider = crate::model::factory::create_provider(&options)?;
+    let mut crate_provider = crate_provider;
 
     // Run defaults to read-only like the TS CLI; `--yes` allows everything.
     let mode = if yes {
@@ -244,7 +279,29 @@ async fn run_command(
     let session_cell = Arc::new(std::sync::Mutex::new(session));
     let tokens_before = serde_json::to_string(&initial_messages).map(|text| text.len().div_ceil(4)).unwrap_or(0);
     let compaction_session = session_cell.clone();
+    // Extension host: trusted project `extensions/` directory.
+    let extension_paths = crate::extensions::discover_extensions(&config.cwd, is_project_trusted(&config.cwd, &config.pi_config_dir));
     let mut tools: Vec<Arc<dyn crate::tools::Tool>> = builtin_tools(&config.cwd);
+    let mut extension_tools: Option<(Arc<crate::extensions::ExtensionHost>, Arc<dyn crate::extensions::AgentObserver>)> = None;
+    let mut extension_host: Option<Arc<crate::extensions::ExtensionHost>> = None;
+    if !extension_paths.is_empty() {
+        let host = crate::extensions::ExtensionHost::new(extension_paths, &config.cwd);
+        match host.start().await {
+            Ok(_) => {
+                let observer: Arc<dyn crate::extensions::AgentObserver> = Arc::new(crate::extensions::HostObserver { host: host.clone() });
+                extension_host = Some(host.clone());
+                for name in host.tool_names() {
+                    if let Ok(wrapper) = host.tool_wrapper(&name) {
+                        tools.push(wrapper);
+                    }
+                }
+                extension_tools = Some((host, observer));
+            }
+            Err(error) => eprintln!("[extension] {error}"),
+        }
+    }
+    let extension_provider_selection = extension_provider.clone();
+    let _ = extension_provider_selection;
     let mcp_manager = if !mcp_servers.is_empty() { Some(connect_mcp_manager(&mcp_servers, &policy).await?) } else { None };
     if let Some(manager) = &mcp_manager {
         for name in manager.tool_names() {
@@ -252,6 +309,9 @@ async fn run_command(
                 tools.push(Arc::new(McpTool { entry }));
             }
         }
+    }
+    if extension_provider.is_some() {
+        crate_provider = resolve_extension_provider(extension_provider.as_deref(), extension_host.as_ref(), None)?;
     }
     let mut agent = Agent::new(
         crate_provider,
@@ -267,6 +327,7 @@ async fn run_command(
         max_steps,
         initial_messages,
         Some(Box::new(approve)),
+        None,
     );
 
     let session_for_events = session_cell.clone();
@@ -441,8 +502,8 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             println!("{VERSION}");
             Ok(0)
         }
-        Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, allow_tool, allow_risk }) => {
-            run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, allow_tool, allow_risk).await
+        Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider, allow_tool, allow_risk }) => {
+            run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider.clone(), allow_tool, allow_risk).await
         }
         Some(Commands::Tui) => crate::cli_tui::run_tui().await,
         Some(Commands::Models { provider, model, endpoint, api_key_env, timeout, retries }) => models_command(provider, model, endpoint, api_key_env, timeout, retries).await,

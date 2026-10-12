@@ -362,6 +362,7 @@ async fn tui_run_agent(
         max_steps,
         retained,
         Some(mcp_approver(policy)),
+        None,
     );
 
     let ui_task = ui.clone();
@@ -504,7 +505,7 @@ pub async fn run_tui() -> Result<i32> {
     let tools_at_start = builtin_tools(&config.cwd);
     let initial_agent = match &options {
         Some(options) => match create_provider(options) {
-            Ok(provider) => Some(Agent::new(provider, tools_at_start, CompactionOptions::default(), None, 8, Vec::new(), Some(mcp_approver(&policy)))),
+            Ok(provider) => Some(Agent::new(provider, tools_at_start, CompactionOptions::default(), None, 8, Vec::new(), Some(mcp_approver(&policy)), None)),
             Err(error) => {
                 ui.push_transcript(format!("system: {error}"));
                 None

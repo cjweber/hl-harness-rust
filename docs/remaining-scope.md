@@ -12,6 +12,13 @@ The Rust crate mirrors the TypeScript harness functionally. This file tracks wha
 - Permission gate: modes, scoped rules (tool/risk/server), always-allow, audit; noninteractive default deny; `--yes`/`--permission-mode`.
 - Four-layer settings hierarchy with flag/env/hl-harness/Pi precedence; `settings` command; `trust status|list|grant|revoke`; `cache` inspection; `models` discovery; `run --json` event stream.
 
+## Ported (phase 6, in addition to phase 5)
+
+- Extension host: child-process isolation with a Node runner (`--experimental-strip-types` for `.ts`) shipped inside the crate (`assets/host-process.mjs`) speaking the identical JSONL protocol (`ready`, `tool`, `command`, `provider`, `tool_result`, `command_result`, `hook_result`, `extension_error`).
+- Extension tools/commands/providers registered from `extensions/` directories (trusted projects), exposed as agent tools with risk `extension`, plus command dispatch and provider registry consulted via `--extension-provider`.
+- Agent hooks `before_tool` (arg rewrite + block/reason veto), `after_tool` (result transformation) following the tool loop, and lifecycle event emit.
+- Extension timeout/error isolation: stderr surfaced as `[extension]` lines, startup deadline with a 5s timeout, pending callers failed on extension errors, tested against a real Node extension including hooks and vetoes.
+
 ## Ported (phase 4, in addition to phase 3)
 
 - MCP client implemented directly on the MCP 2024-11-05 JSON-RPC protocol (no Rust SDK dependency): stdio transport (spawn + newline JSON-RPC, writer serialization, server→client requests answered through an interaction surface, notifications) and Streamable HTTP transport (POST request/response, JSON + SSE bodies, `mcp-session-id` handling, bearer tokens).
