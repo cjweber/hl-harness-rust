@@ -10,5 +10,6 @@ pub mod security;
 pub mod resources;
 pub mod sessions;
 pub mod tools;
+pub mod tui_interactions;
 pub mod tui;
 pub mod types;

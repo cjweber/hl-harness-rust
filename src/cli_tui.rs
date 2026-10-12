@@ -156,7 +156,7 @@ async fn handle_tui_submit(
         let config = default_config(&std::env::current_dir()?, &home_dir());
         let servers = load_mcp_servers(&config.cwd, &config.pi_config_dir, is_project_trusted(&config.cwd, &config.pi_config_dir))?;
         if name.is_empty() {
-            let preview = McpManager::new(&config.cwd, servers, None);
+            let preview = McpManager::new(&config.cwd, servers, Some(Arc::new(crate::tui_interactions::TuiInteractions)));
             ui.push_transcript(format!("mcp servers: {}", preview.names().join(", ")));
             return Ok(0);
         }
@@ -447,6 +447,7 @@ pub async fn run_tui() -> Result<i32> {
     let project_trusted = is_project_trusted(&config.cwd, &config.pi_config_dir);
     let (intents_tx, mut intents_rx) = tokio::sync::mpsc::unbounded_channel::<Intent>();
     let ui = TerminalUi::new(intents_tx.clone());
+    crate::tui_interactions::set_active_ui(Some(ui.clone()));
     let mut session = SessionStore::create(&config.cwd)?;
     for message in session.messages().unwrap_or_default() {
         ui.push_transcript(format!("{}: {}", message.role.as_str(), message.content));
@@ -544,4 +545,16 @@ pub async fn run_tui() -> Result<i32> {
     }
     let _ = ui_task.await;
     Ok(0)
+}
+
+fn hl_harness_tui_theme_list() -> [crate::tui::theme::Theme; 2] {
+    crate::tui::theme::themes()
+}
+
+fn hl_harness_tui_theme_json(content: &str) -> Option<crate::tui::theme::ThemeColors> {
+    crate::tui::theme::theme_from_json(content)
+}
+
+fn hl_harness_tui_set_theme(colors: crate::tui::theme::ThemeColors) {
+    crate::tui::theme::set_active(colors);
 }

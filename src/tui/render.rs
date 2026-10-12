@@ -2,7 +2,7 @@
 //! (dashboard, transcript formatting, wrapping, tool cards, monitors, widgets).
 
 use super::diff_view::{parse_diff, selected_diff, DiffView};
-use super::theme::{ThemeColors, WHIMSICAL};
+use super::theme::{current_colors, ThemeColors};
 use crate::types::CachePlan;
 
 pub const ESC: &str = "\u{1b}[";
@@ -62,13 +62,13 @@ pub fn ansi_bold(value: &str) -> String {
 }
 
 pub fn pacman_indicator(frame: usize, colors: &ThemeColors) -> String {
-    let ghosts = color("ᕚ", colors.accent);
-    let dots = color("·", colors.warning);
+    let ghosts = color("ᕚ", colors.accent.as_str());
+    let dots = color("·", colors.warning.as_str());
     match frame % 4 {
-        0 => format!("{} {} {} {}", color("ᗧ", colors.warning), ghosts, dots, dots),
-        1 => format!("{}{} {} {}", color("ᗧ", colors.warning), dots, ghosts, dots),
-        2 => format!("{} {} {}{}", color("ᗧ", colors.warning), dots, ghosts, dots),
-        _ => format!("{} {} {}{}", color("ᗧ", colors.warning), dots, dots, ghosts),
+        0 => format!("{} {} {} {}", color("ᗧ", colors.warning.as_str()), ghosts, dots, dots),
+        1 => format!("{}{} {} {}", color("ᗧ", colors.warning.as_str()), dots, ghosts, dots),
+        2 => format!("{} {} {}{}", color("ᗧ", colors.warning.as_str()), dots, ghosts, dots),
+        _ => format!("{} {} {}{}", color("ᗧ", colors.warning.as_str()), dots, dots, ghosts),
     }
 }
 
@@ -151,9 +151,9 @@ fn render_entry(entry: &str, width: usize, colors: &ThemeColors) -> Vec<String> 
         };
         let name = header.split(':').next().unwrap_or(header).to_string();
         let args = if header.len() > name.len() { header[name.len()..].trim() } else { "" };
-        let mut head = color("▣ ", colors.accent) + &ansi_bold(&name);
+        let mut head = color("▣ ", colors.accent.as_str()) + &ansi_bold(&name);
         if !args.is_empty() {
-            head.push_str(&color(&format!(" {}", fit(args, width.saturating_sub(name.chars().count() + 6))), colors.muted));
+            head.push_str(&color(&format!(" {}", fit(args, width.saturating_sub(name.chars().count() + 6))), colors.muted.as_str()));
         }
         let body_lines: Vec<String> = if body.is_empty() {
             Vec::new()
@@ -162,7 +162,7 @@ fn render_entry(entry: &str, width: usize, colors: &ThemeColors) -> Vec<String> 
         };
         let capped = if body_lines.len() > TOOL_BODY_LIMIT {
             let mut lines = body_lines[..TOOL_BODY_LIMIT].to_vec();
-            lines.push(color(&format!("  … {} more lines", body_lines.len() - TOOL_BODY_LIMIT), colors.muted));
+            lines.push(color(&format!("  … {} more lines", body_lines.len() - TOOL_BODY_LIMIT), colors.muted.as_str()));
             lines
         } else {
             body_lines
@@ -170,16 +170,16 @@ fn render_entry(entry: &str, width: usize, colors: &ThemeColors) -> Vec<String> 
         return [vec![head], capped].concat();
     }
     if let Some(body) = entry.strip_prefix("assistant: ") {
-        return [vec![color(" ● assistant", colors.success)], wrap_text(&render_markdown(body), width, "  ")].concat();
+        return [vec![color(" ● assistant", colors.success.as_str())], wrap_text(&render_markdown(body), width, "  ")].concat();
     }
     if let Some(body) = entry.strip_prefix("> ") {
-        return [vec![color(" › you", colors.accent)], wrap_text(body, width, "  ")].concat();
+        return [vec![color(" › you", colors.accent.as_str())], wrap_text(body, width, "  ")].concat();
     }
     if let Some(body) = entry.strip_prefix("error: ") {
-        return [vec![color(" ✗ error", colors.error)], wrap_text(body, width, "  ")].concat();
+        return [vec![color(" ✗ error", colors.error.as_str())], wrap_text(body, width, "  ")].concat();
     }
     if let Some(body) = entry.strip_prefix("system: ") {
-        return [vec![color(" · system", colors.muted)], wrap_text(body, width, "  ")].concat();
+        return [vec![color(" · system", colors.muted.as_str())], wrap_text(body, width, "  ")].concat();
     }
     wrap_text(entry, width, "")
 }
@@ -201,15 +201,15 @@ pub fn render_diff(value: &str, colors: &ThemeColors) -> String {
         .split('\n')
         .map(|line| {
             if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff --git") {
-                ansi_bold(&color(line, colors.accent))
+                ansi_bold(&color(line, colors.accent.as_str()))
             } else if line.starts_with("@@") {
-                color(line, colors.accent)
+                color(line, colors.accent.as_str())
             } else if line.starts_with('+') {
-                color(line, colors.success)
+                color(line, colors.success.as_str())
             } else if line.starts_with('-') {
-                color(line, colors.error)
+                color(line, colors.error.as_str())
             } else if line.starts_with("index ") || line.starts_with("new file") || line.starts_with("deleted file") {
-                color(line, colors.muted)
+                color(line, colors.muted.as_str())
             } else {
                 line.to_string()
             }
@@ -220,7 +220,7 @@ pub fn render_diff(value: &str, colors: &ThemeColors) -> String {
 
 /// Markdown rendering: fenced code blocks (with diff highlighting), headings, bullets, quotes, bold.
 pub fn render_markdown(value: &str) -> String {
-    let colors = &WHIMSICAL.colors;
+    let colors = &current_colors();
     let mut blocks: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut inside_fence = false;
@@ -256,16 +256,16 @@ pub fn render_markdown(value: &str) -> String {
             continue;
         }
         let styled = if let Some(heading) = line.strip_prefix("# ") {
-            ansi_bold(&color(&format!("◆ {heading}"), colors.accent))
+            ansi_bold(&color(&format!("◆ {heading}"), colors.accent.as_str()))
         } else if line.starts_with('#') {
             let heading = line.trim_start_matches('#').trim_start();
-            ansi_bold(&color(&format!("◆ {heading}"), colors.accent))
+            ansi_bold(&color(&format!("◆ {heading}"), colors.accent.as_str()))
         } else if let Some(bullet) = line.strip_prefix("- ") {
-            format!("  {} {}", color("•", colors.accent), bullet)
+            format!("  {} {}", color("•", colors.accent.as_str()), bullet)
         } else if let Some(bullet) = line.strip_prefix("* ") {
-            format!("  {} {}", color("•", colors.accent), bullet)
+            format!("  {} {}", color("•", colors.accent.as_str()), bullet)
         } else if let Some(quote) = line.strip_prefix("> ") {
-            color(&format!("│ {quote}"), colors.muted)
+            color(&format!("│ {quote}"), colors.muted.as_str())
         } else {
             line.to_string()
         };
@@ -376,7 +376,7 @@ pub fn render_cache_monitor(history: &CacheHistory, page: usize) -> Vec<String> 
 pub fn render_diff_view(view: &DiffView) -> Vec<String> {
     let (file, hunk) = selected_diff(view);
     let Some(file) = file else { return vec!["diff: no files".to_string()] };
-    let colors = &WHIMSICAL.colors;
+    let colors = &current_colors();
     let hunk_text: Vec<String> = match hunk {
         Some(hunk) => hunk.lines.clone(),
         None => file.lines[..80.min(file.lines.len())].to_vec(),
@@ -437,7 +437,7 @@ pub struct DashboardState<'a> {
 }
 
 pub fn render_dashboard(state: &DashboardState<'_>, width: usize, height: usize) -> String {
-    let colors = &WHIMSICAL.colors;
+    let colors = &current_colors();
     let safe_width = width.max(20);
     let safe_height = height.max(8);
     let cache_line: Option<String> = state.cache_plan.as_ref().map(|plan| {
@@ -474,7 +474,7 @@ pub fn render_dashboard(state: &DashboardState<'_>, width: usize, height: usize)
     lines.extend(render_transcript(state.transcript, safe_width, colors));
     if let Some((risk, summary)) = state.approval {
         lines.push(String::new());
-        lines.push(color(&format!("APPROVAL REQUIRED [{risk}] {summary}"), colors.warning));
+        lines.push(color(&format!("APPROVAL REQUIRED [{risk}] {summary}"), colors.warning.as_str()));
         lines.push(" y allow · a allow always · n deny".to_string());
     }
     lines.push(String::new());

@@ -3,7 +3,7 @@ use hl_harness::tui::render::{
     render_dashboard, render_diff_view, render_markdown, render_transcript, wrap_text, CacheHistory, CacheUsageView,
     DashboardState, ERASE_ROW,
 };
-use hl_harness::tui::theme::THEMES;
+use hl_harness::tui::theme::themes;
 use hl_harness::tui::workspace::{default_workspace, normalize_workspace, widget_at};
 
 #[test]
@@ -21,7 +21,7 @@ fn transcript_styles_roles_groups_and_caps() {
     let out = render_transcript(
         &["[user] long request".to_string(), "● assistant: uses **bold**".to_string(), "▣ tool bash {\"command\":\"cat\"}\n```json\nlong\n```".to_string(), format!("▣ tool bash: ok\n```json\n{long}\n```")],
         60,
-        &THEMES[1].colors,
+        &themes()[1].colors,
     );
     let joined = out.join("\n");
     assert!(joined.contains("More lines truncated") || joined.contains("more lines"), "{joined}");

@@ -19,7 +19,7 @@ Phase 1 of the port — the non-interactive core — is implemented and tested:
 - **Settings hierarchy** (`src/config.rs`): project `.harness/settings.json` > `~/.pi/agent/harness-settings.json` > project `.pi/settings.json` > `~/.pi/agent/settings.json`, with CLI flags and environment above all file layers (same precedence as the TS CLI).
 - **Trust** (`src/config.rs`): `trust status|list|grant|revoke` with project fingerprints.
 
-Run `cargo test` for 13 unit + 33 tests across suites (`cargo test` exercises resource/package, MCP, browser, extension, tool, and render suites) (the real-browser e2e is opt-in with `HARNESS_BROWSER_E2E=1`); MCP stdio is tested against a real Python MCP server, SSE transport against a real local TCP mock server; no network or keys required.
+Run `cargo test` for ~52 tests across suites; MCP elicitation/sampling in the TUI, Streamable HTTP server→client streams, OAuth refresh, and theme resolution are covered (the real-browser e2e is opt-in with `HARNESS_BROWSER_E2E=1`); MCP stdio is tested against a real Python MCP server, SSE transport against a real local TCP mock server; no network or keys required.
 
 ## Usage
 

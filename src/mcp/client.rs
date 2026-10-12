@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use futures_util::StreamExt;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -379,10 +380,16 @@ impl McpClient {
     }
 
     async fn initialize_with_writer(&self, _writer: &Writer) -> Result<Value> {
+        // Capability advertisement is conditional: only when handlers exist (TS parity).
+        let capabilities = if self.interactions.is_some() {
+            json!({"elicitation": {"form": {}}, "sampling": {}})
+        } else {
+            json!({})
+        };
         let response = self
             .request("initialize", json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
+                "capabilities": capabilities,
                 "clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
             }))
             .await?;
@@ -422,6 +429,10 @@ impl McpClient {
         }
     }
 
+    pub(crate) async fn respond_to_server_request(&self, id: u64, reply: &Value) -> Result<()> {
+        self.post_raw_inner(json!({"jsonrpc": "2.0", "id": id, "result": reply}), false).await.map(|_| ())
+    }
+
     /// POST a JSON-RPC request and resolve its response inline (HTTP transports).
     async fn post_raw_value(&self, payload: Value) -> Result<Option<Value>> {
         self.post_raw_inner(payload, true).await
@@ -454,18 +465,32 @@ impl McpClient {
         }
         if status == reqwest::StatusCode::UNAUTHORIZED {
             if let Some(oauth) = &runtime.oauth {
+                let refreshed = try_refresh(oauth, this_name(runtime)).await;
+                if refreshed {
+                    // One retry with the new token.
+                    let mut retry = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)).build().unwrap_or_default().post(&runtime.url).header("content-type", "application/json").header("accept", "application/json, text/event-stream");
+                    for (name, value) in runtime.headers.iter() {
+                        retry = retry.header(name.as_str(), value.as_str());
+                    }
+                    if let Some(session_id) = runtime.session_id.lock().unwrap().clone() {
+                        retry = retry.header("mcp-session-id", session_id);
+                    }
+                    if let Some(tokens) = oauth.lock().await.tokens() {
+                        retry = retry.header("authorization", format!("Bearer {}", tokens.access_token));
+                    }
+                    let retried = retry.body(serde_json::to_string(&payload)?).send().await?;
+                    let retry_status = retried.status();
+                    if retry_status.is_success() {
+                        return handle_http_body(retried, expect_response).await;
+                    }
+                }
                 let provider = oauth.lock().await;
                 let url = provider.authorization_url().await?;
                 bail!("MCP OAuth authorization required: {url}");
             }
             bail!("MCP request unauthorized: HTTP 401");
         }
-        if status.as_u16() == 202 || status.as_u16() == 204 {
-            return Ok(None);
-        }
-        if !status.is_success() {
-            bail!("MCP HTTP error: status {}", status.as_u16());
-        }
+        return handle_http_body(response, expect_response).await;
         let content_type = response.headers().get("content-type").and_then(|value| value.to_str().ok()).unwrap_or_default().to_string();
         let body = response.text().await?;
         if content_type.contains("text/event-stream") {
@@ -533,6 +558,142 @@ impl McpClient {
 extern "C" {
     #[link_name = "kill"]
     fn kill_c(pid: i32, signal: i32) -> i32;
+}
+
+async fn handle_http_body(response: reqwest::Response, expect_response: bool) -> Result<Option<Value>> {
+    let status = response.status();
+    if status.as_u16() == 202 || status.as_u16() == 204 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        bail!("MCP HTTP error: status {}", status.as_u16());
+    }
+    let content_type = response.headers().get("content-type").and_then(|value| value.to_str().ok()).unwrap_or_default().to_string();
+    let body = response.text().await?;
+    if content_type.contains("text/event-stream") {
+        for line in body.split('\n') {
+            let trimmed = line.trim();
+            if let Some(data) = trimmed.strip_prefix("data:") {
+                if let Ok(value) = serde_json::from_str::<Value>(data.trim()) {
+                    if value["id"].is_u64() {
+                        return Ok(Some(value));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    } else {
+        let parsed: Value = serde_json::from_str(&body).map_err(|error| anyhow!("MCP HTTP response not JSON: {error}"))?;
+        Ok(expect_response.then_some(parsed))
+    }
+}
+
+fn this_name(_runtime: &HttpRuntime) -> &'static str {
+    "server"
+}
+
+/// refresh_token grant; returns true when new tokens were issued.
+async fn try_refresh(oauth: &Arc<tokio::sync::Mutex<McpOAuthProvider>>, _name: &str) -> bool {
+    let tokens = oauth.lock().await.tokens();
+    let Some(tokens) = tokens else { return false };
+    let Some(refresh_token) = tokens.refresh_token else { return false };
+    let meta = oauth.lock().await.refresh_parameters_for(&refresh_token).await;
+    let Some((endpoint, form)) = meta else { return false };
+    let response = reqwest::Client::new().post(&endpoint).form(&form).send().await;
+    let Ok(mut response) = response else { return false };
+    if !response.status().is_success() {
+        return false;
+    }
+    let Ok(new_tokens) = response.json::<OAuthTokens>().await else { return false };
+    let _ = oauth.lock().await.save_tokens(&new_tokens);
+    true
+}
+
+/// GET the Streamable HTTP session stream and answer server→client requests
+/// (elicitation/sampling) by POSTing the interaction result back.
+pub(crate) async fn spawn_http_stream(client: Arc<McpClient>) {
+    let Transport::Http(runtime) = &client.transport else { return };
+    let url = runtime.url.clone();
+    let session_id = runtime.session_id.lock().unwrap().clone();
+    let headers = runtime.headers.clone();
+    let oauth = runtime.oauth.clone();
+    let interactions = client.interactions.clone();
+    let task_client = client.clone();
+    tokio::spawn(async move {
+        loop {
+            let mut request = reqwest::Client::builder().timeout(std::time::Duration::from_secs(1800)).build().unwrap_or_default().get(&url).header("accept", "text/event-stream");
+            for (name, value) in headers.iter() {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            if let Some(session_id) = session_id.clone().or_else(|| task_client.current_session()) {
+                request = request.header("mcp-session-id", session_id);
+            }
+            if let Some(tokens) = oauth.as_ref().and_then(|oauth| oauth.blocking_lock().tokens()) {
+                request = request.header("authorization", format!("Bearer {}", tokens.access_token));
+            }
+            let response = match request.send().await {
+                Ok(response) => response,
+                Err(_) => return,
+            };
+            if !response.status().is_success() {
+                return;
+            }
+            let mut buffer = String::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let Ok(chunk) = chunk else { break };
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(boundary) = buffer.find("\n\n") {
+                    let (block, _rest) = buffer.split_at(boundary + 2);
+                    let block = block.to_string();
+                    buffer.drain(..boundary + 2);
+                    for line in block.split('\n') {
+                        let Some(data) = line.trim().strip_prefix("data:") else { continue };
+                        let Ok(message) = serde_json::from_str::<Value>(data.trim()) else { continue };
+                        let Some(id) = message["id"].as_u64() else { continue };
+                        let Some(method) = message["method"].as_str() else { continue };
+                        let params = message["params"].clone();
+                        let reply = server_request_reply(method, params, &interactions).await;
+                        let _ = task_client.respond_to_server_request(id, &reply).await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn server_request_reply(method: &str, params: Value, interactions: &Option<Arc<dyn McpInteractions>>) -> Value {
+    match (method, interactions) {
+        ("elicitation/create", Some(interactions)) => interactions.elicit(params).await.unwrap_or_else(|_| json!({"action": "decline"})),
+        ("sampling/createMessage", Some(interactions)) => interactions.sample(params).await.unwrap_or_else(|_| json!({"action": "decline"})),
+        _ => json!({"action": "decline"}),
+    }
+}
+
+impl McpClient {
+    fn current_session(&self) -> Option<String> {
+        match &self.transport {
+            Transport::Http(runtime) => runtime.session_id.lock().unwrap().clone(),
+            Transport::Stdio(_) => None,
+        }
+    }
+}
+
+impl McpOAuthProvider {
+    /// (token endpoint, form body) for the refresh_token grant.
+    pub async fn refresh_parameters_for(&self, refresh_token: &str) -> Option<(String, Vec<(String, String)>)> {
+        let (_, endpoint) = self.discover_metadata().await.ok()?;
+        let endpoint = endpoint?;
+        let mut form = vec![
+            ("grant_type".to_string(), "refresh_token".to_string()),
+            ("refresh_token".to_string(), refresh_token.to_string()),
+            ("client_id".to_string(), self.config.client_id.clone()),
+        ];
+        if let Some(secret) = &self.config.client_secret {
+            form.push(("client_secret".to_string(), secret.clone()));
+        }
+        Some((endpoint, form))
+    }
 }
 
 fn writer_none() -> Writer {
@@ -680,6 +841,7 @@ impl McpManager {
             bail!("MCP tools/list failed for {name}: {message}");
         }
         self.load_tools(name, client.clone()).await?;
+        crate::mcp::client::spawn_http_stream(client.clone()).await;
         self.active.lock().unwrap().insert(name.to_string(), client.clone());
         Ok(client)
     }
