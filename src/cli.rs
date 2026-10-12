@@ -129,6 +129,10 @@ pub fn apply_settings(
     ))
 }
 
+pub fn load_images_public(paths: &[PathBuf]) -> Result<Vec<ImageAttachment>> {
+    load_images(paths)
+}
+
 fn load_images(paths: &[PathBuf]) -> Result<Vec<ImageAttachment>> {
     const MIME_TYPES: [(&str, &str); 5] = [(".png", "image/png"), (".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".gif", "image/gif"), (".webp", "image/webp")];
     paths
@@ -440,7 +444,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, allow_tool, allow_risk }) => {
             run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, allow_tool, allow_risk).await
         }
-        Some(Commands::Tui) => Err(anyhow::anyhow!("The TUI is not ported yet; use `run` (see docs/remaining-scope.md)")),
+        Some(Commands::Tui) => crate::cli_tui::run_tui().await,
         Some(Commands::Models { provider, model, endpoint, api_key_env, timeout, retries }) => models_command(provider, model, endpoint, api_key_env, timeout, retries).await,
         Some(Commands::Settings) => {
             let (settings, sources) = load_settings(&config.cwd, &config.pi_config_dir);

@@ -29,4 +29,5 @@ url = "2"
 notify = "6"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tokio-tungstenite = "0.23"
+crossterm = "0.28"
 chrono = { version = "0.4", features = ["clock"] }

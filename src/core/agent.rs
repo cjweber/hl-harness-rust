@@ -10,6 +10,7 @@ use std::future::Future;
 use futures_util::StreamExt;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
@@ -157,7 +158,19 @@ impl Agent {
         Ok(true)
     }
 
-    pub async fn run<F: FnMut(HarnessEvent)>(&mut self, prompt: &str, mut on_event: F, images: Vec<ImageAttachment>) -> Result<AgentRunResult> {
+    pub async fn run_checked<F: FnMut(HarnessEvent) + Send>(&mut self, prompt: &str, on_event: F, images: Vec<ImageAttachment>, cancel: Option<Arc<AtomicBool>>) -> Result<AgentRunResult> {
+        if matches!(&cancel, Some(flag) if flag.load(Ordering::SeqCst)) {
+            bail!("Request cancelled");
+        }
+        self.run_inner(prompt, on_event, images, move || matches!(&cancel, Some(flag) if flag.load(Ordering::SeqCst))).await
+    }
+
+    pub async fn run<F: FnMut(HarnessEvent)>(&mut self, prompt: &str, on_event: F, images: Vec<ImageAttachment>) -> Result<AgentRunResult> {
+        self.run_inner(prompt, on_event, images, move || false).await
+    }
+
+    async fn run_inner<F: FnMut(HarnessEvent), C: Fn() -> bool + Send + Sync>(&mut self, prompt: &str, on_event: F, images: Vec<ImageAttachment>, cancelled: C) -> Result<AgentRunResult> {
+        let mut on_event = on_event;
         let turn_start = self.messages.len();
         let mut user_message = Message::user(prompt.to_string());
         user_message.images = images;
@@ -166,6 +179,9 @@ impl Agent {
 
         let mut compacted = false;
         for step in 1..=self.max_steps {
+            if cancelled() {
+                bail!("Request cancelled");
+            }
             let max_messages = self.compaction.max_messages.unwrap_or(24);
             let keep_messages = self.compaction.keep_messages.unwrap_or(8);
             let context_window = self.compaction.context_window.or(self.provider.config().context_window);
@@ -264,6 +280,9 @@ impl Agent {
             on_event(HarnessEvent::AssistantMessage { message: assistant_message });
 
             for call in calls {
+                if cancelled() {
+                    bail!("Request cancelled");
+                }
                 on_event(HarnessEvent::ToolStart { call: call.clone() });
                 let tool = self.tools.iter().find(|candidate| candidate.declaration().name == call.name).cloned();
                 let result: Result<String> = async {
