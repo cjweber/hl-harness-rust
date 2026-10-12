@@ -64,14 +64,29 @@ fn dashboard_rows_fit_and_terminate() {
         40,
     );
     for row in screen.split("\r\n") {
-        for sequence in row.matches("\u{1b}") {
-            let _ = sequence;
-        }
-        assert!(row.replace(|c: char| c == '\u{1b}', "").len() <= 44, "row too wide: {row:?}");
+        let visible = strip_ansi(row);
+        assert!(visible.chars().count() <= 40, "row too wide: {row:?} ({visible:?})");
         assert!(row.ends_with(ERASE_ROW), "row missing erase: {row:?}");
     }
     assert!(screen.contains("Harness"));
     assert!(screen.matches("y allow").count() == 1);
+}
+
+fn strip_ansi(row: &str) -> String {
+    let mut out = String::new();
+    let mut chars = row.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            for follow in chars.by_ref() {
+                if follow == 'm' || follow == 'K' || follow == 'H' || follow == 'J' {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 #[test]

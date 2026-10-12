@@ -47,10 +47,16 @@ pub fn parse_diff(value: &str) -> DiffView {
             continue;
         }
         let index = current.unwrap();
+        let hunk_index = files[index].hunks.len().saturating_sub(1);
+        files[index].lines.push(line.to_string());
         if line.starts_with("@@") {
             files[index].hunks.push(DiffHunk { header: line.to_string(), lines: Vec::new() });
+        } else if files[index].hunks.is_empty() {
+            // Pre-hunk metadata lines land on the file but never on a hunk.
+            let _ = hunk_index;
+        } else {
+            files[index].hunks.last_mut().unwrap().lines.push(line.to_string());
         }
-        files[index].lines.push(line.to_string());
     }
     DiffView { files, file_index: 0, hunk_index: 0, mode: "unified".to_string() }
 }
