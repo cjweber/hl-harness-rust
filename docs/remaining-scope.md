@@ -19,6 +19,13 @@ The Rust crate mirrors the TypeScript harness functionally. This file tracks wha
 - Agent hooks `before_tool` (arg rewrite + block/reason veto), `after_tool` (result transformation) following the tool loop, and lifecycle event emit.
 - Extension timeout/error isolation: stderr surfaced as `[extension]` lines, startup deadline with a 5s timeout, pending callers failed on extension errors, tested against a real Node extension including hooks and vetoes.
 
+## Ported (phase 7, in addition to phase 6)
+
+- Resource loader: conventional `skills/`/`prompts/`/`themes/`/`extensions/` directories, `package.json` `pi` manifests with `**`/`*`/`?` glob matching and `!` exclusions, frontmatter descriptions, SKILL.md directory discovery, theme JSON name from `name` key, index.<ext> naming rules.
+- Context files (AGENTS.override.md/AGENTS.md/CLAUDE.md walk-up) and SYSTEM.md/APPEND_SYSTEM.md system-prompt assembly with the skill catalogue.
+- Packages: npm (`npm:name`) and git (`git:`/https/ssh) resolution including Pi's mirrored `~/.pi/agent/git/...` layout, `npm install/update` + `git clone/pull` delegations, `packages list|install|enable|disable|update|remove` CLI with project-scope trust gating, managed-package files from the four-layer settings hierarchy, and tolerant `resolvePackageRoots` warnings instead of fatal errors (tested against npm/git layouts and settings round trips).
+- `resources` CLI with per-kind counts; verified live: 15 skills + 3 extensions + 18 total package resources reading real Pi settings on the host machine.
+
 ## Ported (phase 4, in addition to phase 3)
 
 - MCP client implemented directly on the MCP 2024-11-05 JSON-RPC protocol (no Rust SDK dependency): stdio transport (spawn + newline JSON-RPC, writer serialization, server→client requests answered through an interaction surface, notifications) and Streamable HTTP transport (POST request/response, JSON + SSE bodies, `mcp-session-id` handling, bearer tokens).

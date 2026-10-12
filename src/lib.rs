@@ -7,6 +7,7 @@ pub mod extensions;
 pub mod mcp;
 pub mod model;
 pub mod security;
+pub mod resources;
 pub mod sessions;
 pub mod tools;
 pub mod tui;

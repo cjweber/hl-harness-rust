@@ -64,7 +64,15 @@ pub enum Commands {
         #[arg(long)]
         allow_risk: Vec<String>,
     },
-    /// Interactive TUI (not yet ported; see docs/remaining-scope.md).
+    Resources,
+    Packages {
+        action: Option<String>,
+        #[arg(default_value = None)]
+        source: Option<String>,
+        /// Write settings at project scope (.pi/settings.json); requires trust
+        #[arg(long)]
+        project: bool,
+    },
     Tui,
     Models {
         #[arg(long)]
@@ -478,6 +486,98 @@ pub async fn connect_mcp_manager(names: &[String], policy: &GatePolicy) -> Resul
     mcp_connect_selected(&manager, names, policy).await?;
     Ok(manager)
 }
+async fn resources_command() -> Result<i32> {
+    let config = default_config(&std::env::current_dir()?, &home_dir());
+    let project_trusted = is_project_trusted(&config.cwd, &config.pi_config_dir);
+    let options = crate::resources::ResourceLoadOptions {
+        cwd: config.cwd.clone(),
+        personal_dir: config.pi_config_dir.clone(),
+        include_project: true,
+        project_trusted,
+        package_roots: crate::resources::packages::resolve_package_roots(
+            &crate::resources::packages::package_sources_from_settings(&config.pi_config_dir, Some(&config.cwd)),
+            &crate::resources::packages::ResolveOptions { cwd: &config.cwd, personal_dir: &config.pi_config_dir, install: false },
+            &|message| eprintln!("[packages] {message}"),
+        ),
+    };
+    let resources = crate::resources::load_resources(&options)?;
+    println!("Skill resources: {}", resources.registry.list(Some(crate::resources::ResourceKind::Skill)).len());
+    println!("Prompt resources: {}", resources.registry.list(Some(crate::resources::ResourceKind::Prompt)).len());
+    println!("Theme resources: {}", resources.registry.list(Some(crate::resources::ResourceKind::Theme)).len());
+    println!("Extension resources: {}", resources.registry.list(Some(crate::resources::ResourceKind::Extension)).len());
+    println!("Context files: {}", resources.context_files.len());
+    Ok(0)
+}
+
+async fn packages_command(action: Option<String>, source: Option<String>, project: bool) -> Result<i32> {
+    let config = default_config(&std::env::current_dir()?, &home_dir());
+    let project_trusted = is_project_trusted(&config.cwd, &config.pi_config_dir);
+    let managed = crate::resources::packages::list_managed_packages(&config.pi_config_dir, Some(&config.cwd));
+    match action.as_deref() {
+        None | Some("list") => {
+            let package_roots = crate::resources::packages::resolve_package_roots(
+                &crate::resources::packages::package_sources_from_settings(&config.pi_config_dir, Some(&config.cwd)),
+                &crate::resources::packages::ResolveOptions { cwd: &config.cwd, personal_dir: &config.pi_config_dir, install: false },
+                &|message| eprintln!("[packages] {message}"),
+            );
+            let resources = crate::resources::load_resources(&crate::resources::ResourceLoadOptions {
+                cwd: config.cwd.clone(),
+                personal_dir: config.pi_config_dir.clone(),
+                include_project: true,
+                project_trusted,
+                package_roots,
+            })?;
+            println!("Package resources: {}", resources.registry.len());
+            for kind in [crate::resources::ResourceKind::Extension, crate::resources::ResourceKind::Skill, crate::resources::ResourceKind::Prompt, crate::resources::ResourceKind::Theme] {
+                println!("{}s: {}", kind.as_str(), resources.registry.list(Some(kind)).len());
+            }
+            for item in managed {
+                println!("{}\t{}\t{}", if item.package.enabled { "enabled" } else { "disabled" }, item.package.source, item.file.display());
+            }
+            Ok(0)
+        }
+        Some("install") => {
+            for source in crate::resources::packages::package_sources_from_settings(&config.pi_config_dir, Some(&config.cwd)) {
+                let resolution = crate::resources::packages::install_package(&source, &crate::resources::packages::ResolveOptions { cwd: &config.cwd, personal_dir: &config.pi_config_dir, install: false })?;
+                println!("{}\t{}", resolution.source, resolution.root.display());
+            }
+            Ok(0)
+        }
+        Some("update") | Some("enable") | Some("disable") | Some("remove") => {
+            let Some(source) = source.clone() else { bail!("packages {} requires a source", action.unwrap()) };
+            let project_scope = if project {
+                if !project_trusted {
+                    bail!("Project is not trusted; run `hl-harness trust` first");
+                }
+                true
+            } else {
+                false
+            };
+            let item = managed.iter().find(|candidate| candidate.package.source == source).cloned().ok_or_else(|| anyhow!("Package is not configured: {source}"))?;
+            let file = item.file.clone();
+            match action.as_deref() {
+                Some("update") => {
+                    let resolution = crate::resources::packages::update_package(&source, &crate::resources::packages::ResolveOptions { cwd: &config.cwd, personal_dir: &config.pi_config_dir, install: false })?;
+                    println!("{}\t{}", resolution.source, resolution.root.display());
+                }
+                Some("enable") => crate::resources::packages::set_package_enabled(&file, &source, true)?,
+                Some("disable") => crate::resources::packages::set_package_enabled(&file, &source, false)?,
+                Some("remove") => {
+                    let removed = crate::resources::packages::remove_managed_package(&file, &source)?;
+                    if !removed {
+                        return Ok(0);
+                    }
+                }
+                _ => {}
+            }
+            let _ = project_scope;
+            println!("{} {}", action.unwrap(), source);
+            Ok(0)
+        }
+        Some(other) => bail!("Unknown packages action: {other}"),
+    }
+}
+
 async fn models_command(provider: Option<String>, model: Option<String>, endpoint: Option<String>, api_key_env: Option<String>, timeout: Option<u64>, retries: u32) -> Result<i32> {
     let (_, options) = apply_settings(provider.as_deref(), model, endpoint, api_key_env)?;
     let options = ProviderOptions { timeout_ms: timeout, max_retries: Some(retries), ..options };
@@ -505,6 +605,8 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider, allow_tool, allow_risk }) => {
             run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider.clone(), allow_tool, allow_risk).await
         }
+        Some(Commands::Resources) => resources_command().await,
+        Some(Commands::Packages { action, source, project }) => packages_command(action, source, project).await,
         Some(Commands::Tui) => crate::cli_tui::run_tui().await,
         Some(Commands::Models { provider, model, endpoint, api_key_env, timeout, retries }) => models_command(provider, model, endpoint, api_key_env, timeout, retries).await,
         Some(Commands::Settings) => {
