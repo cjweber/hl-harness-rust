@@ -2,7 +2,7 @@
 //! (dashboard, transcript formatting, wrapping, tool cards, monitors, widgets).
 
 use super::diff_view::{parse_diff, selected_diff, DiffView};
-use super::theme::{current_colors, ThemeColors};
+use super::theme::{current_colors, gradient_bar, gradient_text, ThemeColors};
 use crate::types::CachePlan;
 
 pub const ESC: &str = "\u{1b}[";
@@ -170,13 +170,13 @@ fn render_entry(entry: &str, width: usize, colors: &ThemeColors) -> Vec<String> 
         return [vec![head], capped].concat();
     }
     if let Some(body) = entry.strip_prefix("assistant: ") {
-        return [vec![color(" ● assistant", colors.success.as_str())], wrap_text(&render_markdown(body), width, "  ")].concat();
+        return [vec![gradient_text(" ◉ assistant", super::theme::section_color("project"), super::theme::section_color("context"))], wrap_text(&render_markdown(body), width, "  ")].concat();
     }
     if let Some(body) = entry.strip_prefix("> ") {
-        return [vec![color(" › you", colors.accent.as_str())], wrap_text(body, width, "  ")].concat();
+        return [vec![gradient_text(" ◈ you", section_accent("cache"), section_accent("model"))], wrap_text(body, width, "  ")].concat();
     }
     if let Some(body) = entry.strip_prefix("error: ") {
-        return [vec![color(" ✗ error", colors.error.as_str())], wrap_text(body, width, "  ")].concat();
+        return [vec![color(" ✖ error", colors.error.as_str())], wrap_text(body, width, "  ")].concat();
     }
     if let Some(body) = entry.strip_prefix("system: ") {
         return [vec![color(" · system", colors.muted.as_str())], wrap_text(body, width, "  ")].concat();
@@ -280,6 +280,7 @@ pub fn render_markdown(value: &str) -> String {
 pub fn render_workspace(layout: &super::workspace::WorkspaceLayout, values: &[(&str, String)], width: usize) -> Vec<String> {
     let safe_width = width.max(20);
     let rows = layout.widgets.iter().map(|widget| widget.y + widget.height).max().unwrap_or(1);
+    // Frame pass: rounded-corner glyphs per cell.
     let mut canvas: Vec<Vec<char>> = vec![vec![' '; safe_width]; rows];
     for widget in layout.widgets.iter().filter(|widget| widget.visible) {
         let left = (((widget.x as f64) / 100.0) * safe_width as f64).round() as usize;
@@ -291,9 +292,9 @@ pub fn render_workspace(layout: &super::workspace::WorkspaceLayout, values: &[(&
             for column in 0..box_width {
                 let edge = column == 0 || column == box_width - 1;
                 let ch = if row == 0 {
-                    if column == 0 { '┌' } else if edge { '┐' } else { '─' }
+                    if column == 0 { '╭' } else if edge { '╮' } else { '─' }
                 } else if row == widget.height - 1 {
-                    if column == 0 { '└' } else if edge { '┘' } else { '─' }
+                    if column == 0 { '╰' } else if edge { '╯' } else { '─' }
                 } else if edge {
                     '│'
                 } else {
@@ -322,8 +323,56 @@ pub fn render_workspace(layout: &super::workspace::WorkspaceLayout, values: &[(&
             }
         }
     }
-    canvas.into_iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect()
+    // Color pass: per-section hue with a gradient title bar and dimmed frame.
+    canvas
+        .into_iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            let plain: String = row.iter().collect();
+            let plain = plain.trim_end().to_string();
+            let mut decorated = String::new();
+            let mut cursor = 0usize;
+            // Visit every widget that claims this row, in left-to-right order.
+            let claiming: Vec<_> = layout
+                .widgets
+                .iter()
+                .filter(|widget| widget.visible)
+                .filter(|widget| {
+                    let left = (((widget.x as f64) / 100.0) * safe_width as f64).round() as usize;
+                    widget.y <= row_index && row_index < widget.y + widget.height
+                })
+                .collect();
+            for widget in claiming {
+                let left = (((widget.x as f64) / 100.0) * safe_width as f64).round() as usize;
+                let left = left.min(safe_width - 1);
+                let box_width = widget.width.max(4).min(safe_width - left);
+                if left >= decorated.len() {
+                    // Append the unstyled gap before this widget.
+                    let gap_end = left.min(plain.chars().count());
+                    let gap: String = plain.chars().skip(cursor).take(gap_end.saturating_sub(cursor)).collect();
+                    decorated.push_str(&gap);
+                    cursor = gap_end;
+                }
+                let span: String = plain.chars().skip(cursor).take(box_width).collect();
+                let hue = super::theme::section_color(&widget.id);
+                if widget.y == row_index {
+                    decorated.push_str(&super::theme::gradient_text(&span, hue, &super::theme::lighten(hue, 0.45)));
+                } else {
+                    let dimmed = super::theme::darken(hue, 0.45);
+                    let mut shaded = String::new();
+                    for ch in span.chars() {
+                        shaded.push_str(&color(&ch.to_string(), dimmed.as_str()));
+                    }
+                    decorated.push_str(&shaded);
+                }
+                cursor = (cursor + box_width).min(plain.chars().count());
+            }
+            decorated.push_str(&plain.chars().skip(cursor).collect::<String>());
+            decorated
+        })
+        .collect()
 }
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CacheHistoryEntry {
@@ -349,11 +398,20 @@ pub fn render_cache_monitor(history: &CacheHistory, page: usize) -> Vec<String> 
     let latencies: Vec<u64> = history.entries.iter().filter_map(|entry| entry.latency_ms).collect();
     let average = if latencies.is_empty() { 0 } else { latencies.iter().sum::<u64>() / latencies.len() as u64 };
     let start = history.index.saturating_sub(page / 2);
+    let hit_percent = if prompt > 0 { cached * 100 / prompt } else { 0 };
+    let bar_cells = 10usize;
+    let filled = ((hit_percent as usize) * bar_cells / 100).clamp(0, bar_cells);
+    let hit_hue = if hit_percent >= 50 { super::theme::section_color("project") } else { super::theme::section_color("git") };
+    let bar = format!(
+        "{}{}",
+        gradient_bar(filled, hit_hue, super::theme::lighten(hit_hue, 0.4).as_str()),
+        color(&"░".repeat(bar_cells - filled), super::theme::darken(hit_hue, 0.6).as_str())
+    );
     let mut lines = vec![format!(
-        "cache history {}/{} · hit {cached}/{prompt} tok ({}%) · avg {average}ms",
+        "cache history {}/{} · hit {cached}/{prompt} tok ({}%) {bar} · avg {average}ms",
         history.index + 1,
         total,
-        if prompt > 0 { cached * 100 / prompt } else { 0 }
+        hit_percent
     )];
     for offset in 0..page.min(total - start) {
         let position = start + offset;
@@ -436,6 +494,10 @@ pub struct DashboardState<'a> {
     pub diff: Option<&'a DiffView>,
 }
 
+fn section_accent(section: &str) -> &'static str {
+    super::theme::section_color(section)
+}
+
 pub fn render_dashboard(state: &DashboardState<'_>, width: usize, height: usize) -> String {
     let colors = &current_colors();
     let safe_width = width.max(20);
@@ -455,7 +517,8 @@ pub fn render_dashboard(state: &DashboardState<'_>, width: usize, height: usize)
         }
     });
     let mut lines: Vec<String> = Vec::new();
-    lines.push(fit(&format!(" {} ", state.title), safe_width));
+    let banner = gradient_text(&format!(" ✦ {} ✦ ", state.title), section_accent("cache"), section_accent("mcp"));
+    lines.push(fit(&banner, safe_width));
     lines.push(fit(&cache_line.map(|line| format!(" {line}")).unwrap_or_else(|| " cache unavailable".into()), safe_width));
     if let Some(workspace) = state.workspace {
         lines.extend(render_workspace(workspace.layout, &workspace.values, safe_width));

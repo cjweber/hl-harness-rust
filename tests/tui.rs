@@ -68,8 +68,10 @@ fn dashboard_rows_fit_and_terminate() {
         assert!(visible.chars().count() <= 40, "row too wide: {row:?} ({visible:?})");
         assert!(row.ends_with(ERASE_ROW), "row missing erase: {row:?}");
     }
-    assert!(screen.contains("Harness"));
-    assert!(screen.matches("y allow").count() == 1);
+    let visible = strip_ansi(&screen);
+    assert!(visible.contains("Harness"), "{visible:?}");
+    assert!(visible.contains("✦"), "gradient banner: {visible:?}");
+    assert!(visible.matches("y allow").count() == 1);
 }
 
 fn strip_ansi(row: &str) -> String {
