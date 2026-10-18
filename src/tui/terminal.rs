@@ -62,9 +62,11 @@ pub struct TerminalUi {
     cache_history_watch: Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
 }
 
-const ESC: &str = "\u{1b}";
+const ESC: &str = "\u{1b}[";
 const CURSOR_HIDE: &str = "\u{1b}[?25l";
 const CURSOR_SHOW: &str = "\u{1b}[?25h";
+const SCREEN_ENTER: &str = "\u{1b}[?1049h\u{1b}[2J"; // alternate screen + clear (TS: ?1049h)
+const SCREEN_LEAVE: &str = "\u{1b}[?1049l";
 const MOUSE_ENABLE: &str = "\u{1b}[?1000h\u{1b}[?1006h";
 const MOUSE_DISABLE: &str = "\u{1b}[?1006l\u{1b}[?1000l";
 
@@ -364,8 +366,7 @@ impl TerminalUi {
     /// Enter the alternate screen, draw, and drive the loop until Ctrl-C.
     pub async fn start(&self, ui: Arc<TerminalUi>) -> AnyResult<()> {
         terminal::enable_raw_mode().ok();
-        crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen).ok();
-        print!("{CURSOR_HIDE}{MOUSE_ENABLE}");
+        print!("{SCREEN_ENTER}{CURSOR_HIDE}{MOUSE_ENABLE}");
         let _ = std::io::stdout().flush();
         self.draw();
 
@@ -396,7 +397,7 @@ impl TerminalUi {
         }
         input_handle.join().ok();
         terminal::disable_raw_mode().ok();
-        print!("{CURSOR_SHOW}{MOUSE_DISABLE}\u{1b}[?1049l");
+        print!("{CURSOR_SHOW}{MOUSE_DISABLE}{SCREEN_LEAVE}");
         let _ = std::io::stdout().flush();
         Ok(())
     }
@@ -422,7 +423,10 @@ impl TerminalUi {
         let values = self.workspace_values.lock().unwrap().clone();
         let plan = self.cache.lock().unwrap().clone();
         let usage = self.cache_usage.lock().unwrap().clone();
+        // A 0-sized PTY (common under `script`/CI) falls back to 80x24 like the TS `|| 80`/`|| 24`.
         let (width, height) = terminal::size().map(|(width, height)| (width as usize, height as usize)).unwrap_or((80, 24));
+        let width = if width == 0 { 80 } else { width };
+        let height = if height == 0 { 24 } else { height };
 
         let mut widget_values: Vec<(String, String)> = values;
         if widget_values.is_empty() && layout.is_some() {

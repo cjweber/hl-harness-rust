@@ -536,7 +536,41 @@ async fn browser_e2e_real_chrome() {
 #[tokio::test]
 async fn mcp_stdio_end_to_end() {
     let root = tempfile_dir();
-    let script = "/tmp/mcp-echo-server.py".to_string();
+    // Self-contained mock server: a Python MCP stdio echo server written next to the test root.
+    let script = root.join("mcp-echo-server.py").to_string_lossy().to_string();
+    std::fs::write(&script, r#"#!/usr/bin/env python3
+import json, sys
+
+def send(msg):
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+while True:
+    line = sys.stdin.readline()
+    if not line:
+        break
+    try:
+        message = json.loads(line)
+    except ValueError:
+        continue
+    method = message.get("method")
+    request_id = message.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "echo", "version": "1.0"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"tools": [{"name": "echo", "description": "echo text back", "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}})
+    elif method == "tools/call":
+        arguments = message["params"].get("arguments", {})
+        text = str(arguments.get("text", ""))
+        if text == "fail":
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": "simulated tool failure"}], "isError": True}})
+        else:
+            send({"jsonrpc": "2.0", "id": request_id, "result": {"content": [{"type": "text", "text": "echo: " + text}], "isError": False}})
+    elif method == "resources/list":
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"resources": [{"uri": "file:///echo.txt", "name": "echo resource"}]}})
+    elif method == "prompts/list":
+        send({"jsonrpc": "2.0", "id": request_id, "result": {"prompts": [{"name": "hello", "description": "hello prompt"}]}})
+"#).unwrap();
     let config = std::collections::BTreeMap::from([(
         "echo".to_string(),
         hl_harness::mcp::client::McpServerConfig {
