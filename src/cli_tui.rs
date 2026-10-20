@@ -67,6 +67,7 @@ async fn handle_tui_submit(
     policy: &SharedGatePolicy,
     max_steps: usize,
     mcp_manager: &Arc<tokio::sync::Mutex<Option<Arc<McpManager>>>>,
+    reasoning_cell: &Arc<tokio::sync::Mutex<crate::types::ReasoningLevel>>,
     cancel: &Arc<AtomicBool>,
     busy: &Arc<AtomicBool>,
 ) -> Result<i32> {
@@ -234,6 +235,74 @@ async fn handle_tui_submit(
         }
         return Ok(0);
     }
+    // /model [provider] <model>: rebuild the provider + agent with a new model.
+    if let Some(rest) = submitted.strip_prefix("/model").map(|value| value.trim().to_string()) {
+        if rest.is_empty() {
+            let current = options_cell.lock().await.clone();
+            let label = match current {
+                Some(options) => format!("model: {} · provider: {}", options.model.clone().unwrap_or_else(|| "settings default".into()), options.provider.unwrap_or(ProviderId::OpenRouter).as_str()),
+                None => "model: settings default".to_string(),
+            };
+            ui.push_transcript(format!("system: {label} (usage: /model [provider] <model-id>)"));
+            return Ok(0);
+        }
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        let (provider_word, model_word) = match words.len() {
+            1 => (None, words[0]),
+            _ => (Some(words[0]), words[1]),
+        };
+        let mut options = options_cell.lock().await.clone().unwrap_or_default();
+        if let Some(provider_word) = provider_word {
+            match ProviderId::from_str(provider_word) {
+                Some(provider) => options.provider = Some(provider),
+                None => {
+                    ui.push_transcript(format!("error: unknown provider {provider_word}"));
+                    return Ok(0);
+                }
+            }
+        }
+        options.model = Some(model_word.to_string());
+        match create_provider(&options) {
+            Ok(provider) => {
+                *options_cell.lock().await = Some(options.clone());
+                let messages = agent_cell.lock().await.as_ref().map(|agent| agent.messages().to_vec()).unwrap_or_default();
+                let mut agent = Agent::new(provider, builtin_tools(&config_path()), CompactionOptions::default(), None, max_steps, messages, Some(mcp_approver(policy)), None);
+                agent.set_reasoning(*reasoning_cell.lock().await);
+                *agent_cell.lock().await = Some(agent);
+                ui.set_widget_value("model", &format!("{} · {}", options.provider.unwrap_or(ProviderId::OpenRouter).as_str(), model_word));
+                ui.push_transcript(format!("system: model switched to {model_word}"));
+                ui.set_status("Model switched");
+            }
+            Err(error) => {
+                ui.push_transcript(format!("error: {error}"));
+                ui.set_status("Model switch failed");
+            }
+        }
+        return Ok(0);
+    }
+    // /reasoning <off|low|medium|high>
+    if let Some(rest) = submitted.strip_prefix("/reasoning").map(|value| value.trim().to_string()) {
+        if rest.is_empty() {
+            ui.push_transcript(format!("system: reasoning is {}", reasoning_cell.lock().await.as_str()));
+            ui.push_transcript("system: usage: /reasoning off|low|medium|high".to_string());
+            return Ok(0);
+        }
+        match crate::types::ReasoningLevel::from_str(&rest) {
+            Some(level) => {
+                *reasoning_cell.lock().await = level;
+                if let Some(agent) = agent_cell.lock().await.as_mut() {
+                    agent.set_reasoning(level);
+                }
+                ui.set_widget_value("model", &format!("{}/reasoning {}", current_model_label(options_cell).await, level.as_str()));
+                ui.push_transcript(format!("system: reasoning set to {}", level.as_str()));
+                ui.set_status("Reasoning updated");
+            }
+            None => {
+                ui.push_transcript(format!("error: unknown reasoning level {rest}"));
+            }
+        }
+        return Ok(0);
+    }
     if submitted == "/compact" {
         let mut agent = agent_cell.lock().await;
         match agent.as_mut() {
@@ -281,6 +350,7 @@ async fn handle_tui_submit(
     let cancel_task = cancel.clone();
     let busy_task = busy.clone();
     let mcp_task = mcp_manager.clone();
+    let reasoning_cell_task = reasoning_cell.clone();
     let max_steps_task = max_steps;
     tokio::spawn(async move {
         ui_task.push_transcript(format!("> {submitted}"));
@@ -295,6 +365,7 @@ async fn handle_tui_submit(
             max_steps_task,
             &submitted,
             &cancel_task,
+            &reasoning_cell_task,
         )
         .await;
         match run {
@@ -327,6 +398,7 @@ async fn tui_run_agent(
     max_steps: usize,
     prompt: &str,
     cancel: &Arc<AtomicBool>,
+    reasoning_cell: &Arc<tokio::sync::Mutex<crate::types::ReasoningLevel>>,
 ) -> Result<(usize, String)> {
     let options = options_cell.lock().await.clone().ok_or_else(|| anyhow!("provider is not configured"))?;
     let provider = create_provider(&options)?;
@@ -490,10 +562,12 @@ pub async fn run_tui() -> Result<i32> {
         "/diff".into(),
         "/cache".into(),
         "/conflicts".into(),
+        "/model ".into(),
+        "/reasoning ".into(),
     ]);
 
     // Provider from settings; failure is shown but not fatal (TS behaves the same).
-    let (provider_id, options) = match crate::cli::apply_settings(None, None, None, None) {
+    let (provider_id, options) = match crate::cli::apply_settings(None, None, None, None, None) {
         Ok((provider_id, options)) => (provider_id, Some(options)),
         Err(error) => {
             ui.push_transcript(format!("system: {error}"));
@@ -516,6 +590,12 @@ pub async fn run_tui() -> Result<i32> {
     };
     let agent_state: Arc<tokio::sync::Mutex<Option<Agent>>> = Arc::new(tokio::sync::Mutex::new(initial_agent));
     let mcp_manager: Arc<tokio::sync::Mutex<Option<Arc<McpManager>>>> = Arc::new(tokio::sync::Mutex::new(None));
+    let reasoning_cell: Arc<tokio::sync::Mutex<crate::types::ReasoningLevel>> = Arc::new(tokio::sync::Mutex::new(options.as_ref().and_then(|options| options.reasoning).unwrap_or_default()));
+    if let Some(level) = options.as_ref().and_then(|options| options.reasoning) {
+        if let Some(agent) = agent_state.lock().await.as_mut() {
+            agent.set_reasoning(level);
+        }
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     let busy = Arc::new(AtomicBool::new(false));
 
@@ -536,7 +616,7 @@ pub async fn run_tui() -> Result<i32> {
                 }
             }
             Intent::Submit(text) => {
-                handle_tui_submit(&ui, &text, &session_cell, &provider_state, &agent_state, &policy, 8, &mcp_manager, &cancel, &busy).await?;
+                handle_tui_submit(&ui, &text, &session_cell, &provider_state, &agent_state, &policy, 8, &mcp_manager, &reasoning_cell, &cancel, &busy).await?;
             }
         }
     }
@@ -545,6 +625,19 @@ pub async fn run_tui() -> Result<i32> {
     }
     let _ = ui_task.await;
     Ok(0)
+}
+
+fn config_path() -> std::path::PathBuf {
+    default_config(&std::env::current_dir().unwrap_or_default(), &home_dir()).cwd
+}
+
+async fn current_model_label(provider_state: &Arc<tokio::sync::Mutex<Option<ProviderOptions>>>) -> String {
+    provider_state
+        .lock()
+        .await
+        .clone()
+        .and_then(|options| options.model)
+        .unwrap_or_else(|| "settings default".into())
 }
 
 fn hl_harness_tui_theme_list() -> [crate::tui::theme::Theme; 2] {

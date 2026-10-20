@@ -1,7 +1,7 @@
 //! Native Anthropic Messages streaming provider, ported from `src/model/anthropic.ts`.
 
 use super::provider::{Provider, ProviderConfig, ProviderEvent, ProviderRequest};
-use crate::types::{Message, Role, ToolDeclaration};
+use crate::types::{Message, ReasoningLevel, Role, ToolDeclaration};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
@@ -140,7 +140,19 @@ impl AnthropicProvider {
         let (system, messages) = anthropic_messages(&request.messages);
         let mut body = Map::new();
         body.insert("model".into(), json!(request.model.clone().unwrap_or_else(|| self.config.model.clone())));
-        body.insert("max_tokens".into(), json!(4096));
+        let mut max_tokens = 4096u64;
+        if let Some(ReasoningLevel::Low | ReasoningLevel::Medium | ReasoningLevel::High) = request.reasoning {
+            // Anthropic thinking: budget grows with the level; max_tokens must cover it.
+            let budget = match request.reasoning.unwrap() {
+                ReasoningLevel::Low => 2048,
+                ReasoningLevel::Medium => 8192,
+                ReasoningLevel::High => 16384,
+                ReasoningLevel::Off => 0,
+            };
+            body.insert("thinking".into(), json!({"type": "enabled", "budget_tokens": budget}));
+            max_tokens = max_tokens.max(budget + 4096);
+        }
+        body.insert("max_tokens".into(), json!(max_tokens));
         if !system.is_empty() {
             body.insert("system".into(), json!(system));
         }

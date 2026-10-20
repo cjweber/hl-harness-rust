@@ -31,6 +31,7 @@ pub struct HarnessSettings {
     pub api_key_env: Option<String>,
     pub context_window: Option<f64>,
     pub theme: Option<String>,
+    pub default_thinking_level: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +85,9 @@ pub fn load_settings(cwd: &Path, config_dir: &Path) -> (HarnessSettings, Vec<Pat
         }
         if settings.theme.is_none() {
             settings.theme = values.get("theme").and_then(Value::as_str).map(str::to_string);
+        }
+        if settings.default_thinking_level.is_none() {
+            settings.default_thinking_level = values.get("defaultThinkingLevel").and_then(Value::as_str).map(str::to_string);
         }
     };
     let mut sources = Vec::new();

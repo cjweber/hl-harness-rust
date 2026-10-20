@@ -14,6 +14,7 @@ pub struct ProviderOptions {
     pub api_key: Option<String>,
     pub api_key_env: Option<String>,
     pub session_id: Option<String>,
+    pub reasoning: Option<crate::types::ReasoningLevel>,
     pub timeout_ms: Option<u64>,
     pub max_retries: Option<u32>,
     pub context_window: Option<u64>,

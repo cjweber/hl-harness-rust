@@ -59,6 +59,9 @@ pub enum Commands {
         /// Use a provider registered by an extension.
         #[arg(long = "extension-provider")]
         extension_provider: Option<String>,
+        /// Reasoning amount: off|low|medium|high (default from defaultThinkingLevel).
+        #[arg(long)]
+        reasoning: Option<String>,
         #[arg(long)]
         allow_tool: Vec<String>,
         #[arg(long)]
@@ -120,10 +123,11 @@ pub fn apply_settings(
     cli_model: Option<String>,
     cli_endpoint: Option<String>,
     cli_api_key_env: Option<String>,
+    cli_reasoning: Option<&str>,
 ) -> Result<(ProviderId, ProviderOptions)> {
     let config = default_config(&std::env::current_dir()?, &home_dir());
     let (settings, _) = load_settings(&config.cwd, &config.pi_config_dir);
-    let HarnessSettings { default_provider, default_model, endpoint, api_key_env, context_window, theme: _ } = settings;
+    let HarnessSettings { default_provider, default_model, endpoint, api_key_env, context_window, theme: _, default_thinking_level } = settings;
     let provider_name = cli_provider.map(str::to_string).or(default_provider).unwrap_or_else(|| "openrouter".to_string());
     let provider = ProviderId::from_str(&provider_name).ok_or_else(|| anyhow::anyhow!("Unknown provider: {provider_name}"))?;
     let env_model = std::env::var(format!("{}_MODEL", provider.as_str().to_uppercase().replace('-', "_")))
@@ -134,9 +138,13 @@ pub fn apply_settings(
     let endpoint = cli_endpoint.or(endpoint).or_else(|| std::env::var("HARNESS_ENDPOINT").ok().filter(|value| !value.is_empty()));
     let api_key_env = cli_api_key_env.or(api_key_env);
     let context_window = context_window.filter(|window| *window > 0.0).map(|window| window as u64).or(env_window);
+    // Reasoning precedence: flag > env (HARNESS_REASONING) > settings.defaultThinkingLevel > off.
+    let env_reasoning = std::env::var("HARNESS_REASONING").ok().filter(|value| !value.is_empty());
+    let reasoning_name = cli_reasoning.map(str::to_string).or(env_reasoning).or(default_thinking_level);
+    let reasoning = reasoning_name.as_deref().and_then(crate::types::ReasoningLevel::from_str);
     Ok((
         provider,
-        ProviderOptions { provider: Some(provider), model, endpoint, api_key: None, api_key_env, session_id: None, timeout_ms: None, max_retries: None, context_window, headers: Vec::new() },
+        ProviderOptions { provider: Some(provider), model, endpoint, api_key: None, api_key_env, session_id: None, timeout_ms: None, max_retries: None, context_window, headers: Vec::new(), reasoning },
     ))
 }
 
@@ -250,11 +258,12 @@ async fn run_command(
     retries: u32,
     mcp_servers: Vec<String>,
     extension_provider: Option<String>,
+    reasoning: Option<String>,
     allow_tool: Vec<String>,
     allow_risk: Vec<String>,
 ) -> Result<i32> {
     let config = default_config(&std::env::current_dir()?, &home_dir());
-    let (_, mut options) = apply_settings(provider.as_deref(), model.clone(), endpoint.clone(), api_key_env.clone())?;
+    let (_, mut options) = apply_settings(provider.as_deref(), model.clone(), endpoint.clone(), api_key_env.clone(), reasoning.as_deref())?;
     options.timeout_ms = Some(timeout);
     options.max_retries = Some(retries);
     let crate_provider = crate::model::factory::create_provider(&options)?;
@@ -579,7 +588,7 @@ async fn packages_command(action: Option<String>, source: Option<String>, projec
 }
 
 async fn models_command(provider: Option<String>, model: Option<String>, endpoint: Option<String>, api_key_env: Option<String>, timeout: Option<u64>, retries: u32) -> Result<i32> {
-    let (_, options) = apply_settings(provider.as_deref(), model, endpoint, api_key_env)?;
+    let (_, options) = apply_settings(provider.as_deref(), model, endpoint, api_key_env, None)?;
     let options = ProviderOptions { timeout_ms: timeout, max_retries: Some(retries), ..options };
     let config = provider_config(&options)?;
     for info in discover_models(&config).await? {
@@ -602,8 +611,8 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             println!("{VERSION}");
             Ok(0)
         }
-        Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider, allow_tool, allow_risk }) => {
-            run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider.clone(), allow_tool, allow_risk).await
+        Some(Commands::Run { prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider, reasoning, allow_tool, allow_risk }) => {
+            run_command(prompt, provider, model, endpoint, api_key_env, max_steps, session, images, permission_mode, yes, json, timeout, retries, mcp_servers, extension_provider.clone(), reasoning.clone(), allow_tool, allow_risk).await
         }
         Some(Commands::Resources) => resources_command().await,
         Some(Commands::Packages { action, source, project }) => packages_command(action, source, project).await,

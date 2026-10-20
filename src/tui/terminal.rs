@@ -279,6 +279,17 @@ impl TerminalUi {
         outcome.to_string()
     }
 
+    /// Update one workspace widget value in place.
+    pub fn set_widget_value(&self, id: &str, value: &str) {
+        let mut values = self.workspace_values.lock().unwrap();
+        match values.iter_mut().find(|(key, _)| key == id) {
+            Some(slot) => slot.1 = value.to_string(),
+            None => values.push((id.to_string(), value.to_string())),
+        }
+        drop(values);
+        self.draw();
+    }
+
     pub fn set_completions(&self, values: Vec<String>) {
         *self.completions.lock().unwrap() = values;
         self.draw();

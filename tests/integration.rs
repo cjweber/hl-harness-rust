@@ -99,7 +99,7 @@ async fn provider_streams_text_usage_and_tool_calls_over_sse() {
     );
     let server = MockServer::start(body, 200).await;
     let provider = sse_provider(server.url());
-    let events: Vec<ProviderEvent> = provider.stream(ProviderRequest { messages: vec![Message::user("hi")], tools: Vec::new(), model: None }).map(|event| event.unwrap()).collect().await;
+    let events: Vec<ProviderEvent> = provider.stream(ProviderRequest { messages: vec![Message::user("hi")], tools: Vec::new(), model: None, reasoning: None }).map(|event| event.unwrap()).collect().await;
     let collected: Vec<String> = events.iter().map(|event| format!("{event:?}")).collect();
     let joined = collected.join("\n");
     assert!(joined.contains("TextDelta { text: \"hello\" }"), "{joined}");
@@ -927,4 +927,77 @@ async fn streamable_http_refresh_retry_and_session() {
         }
     }
     server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 10: model + reasoning switching
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn openai_requests_carry_reasoning_effort_when_set() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let captured = captured_server_shared().clone();
+    let captured_server = captured.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            let mut buffer = vec![0u8; 65536];
+            loop {
+                let read = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer).await.unwrap();
+                raw.extend_from_slice(&buffer[..read]);
+                if String::from_utf8_lossy(&raw).contains("\r\n\r\n") && String::from_utf8_lossy(&raw).contains("}") {
+                    break;
+                }
+            }
+            *captured_server.lock().unwrap() = String::from_utf8_lossy(&raw).to_string();
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            let response = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}", body.len(), body);
+            tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await.unwrap();
+        }
+    });
+
+    let provider = OpenAICompatibleProvider::new(ProviderConfig {
+        id: ProviderKind::OpenCodeGo,
+        name: "opencode-go".into(),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        api_key: Some("k".into()),
+        model: "test".into(),
+        session_id: None,
+        headers: Vec::new(),
+        timeout_ms: Some(5000),
+        max_retries: Some(0),
+        retry_delay_ms: None,
+        context_window: None,
+    });
+    for (level, expected) in [(Some(ReasoningLevel::High), Some("\"reasoning_effort\":\"high\"")), (Some(ReasoningLevel::Off), None), (None, None)] {
+        *captured.lock().unwrap() = String::new();
+        let events: Vec<ProviderEvent> = provider
+            .stream(ProviderRequest { messages: vec![Message::user("hi")], tools: Vec::new(), model: None, reasoning: level })
+            .map(|event| event.unwrap())
+            .collect()
+            .await;
+        assert!(events.len() >= 1);
+        let request = captured_server_shared().lock().unwrap().clone();
+        match expected {
+            Some(expected) => assert!(request.contains(expected), "{request}"),
+            None => assert!(!request.contains("reasoning_effort"), "{request}"),
+        }
+    }
+}
+
+#[test]
+fn reasoning_levels_parse() {
+    assert_eq!(ReasoningLevel::from_str("off"), Some(ReasoningLevel::Off));
+    assert_eq!(ReasoningLevel::from_str("MED"), Some(ReasoningLevel::Medium));
+    assert_eq!(ReasoningLevel::from_str("High"), Some(ReasoningLevel::High));
+    assert_eq!(ReasoningLevel::from_str("banana"), None);
+}
+
+use hl_harness::types::ReasoningLevel;
+
+fn captured_server_shared() -> &'static Arc<std::sync::Mutex<String>> {
+    static CELL: std::sync::OnceLock<Arc<std::sync::Mutex<String>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| Arc::new(std::sync::Mutex::new(String::new())))
 }

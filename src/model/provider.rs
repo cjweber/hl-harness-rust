@@ -1,6 +1,6 @@
 //! OpenAI-compatible streaming provider, ported from `src/model/provider.ts`.
 
-use crate::types::{Message, ToolCall, ToolDeclaration};
+use crate::types::{Message, ReasoningLevel, ToolCall, ToolDeclaration};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use futures_util::stream::BoxStream;
@@ -65,6 +65,8 @@ pub struct ProviderRequest {
     pub tools: Vec<ToolDeclaration>,
     /// Optional per-request model override, used by compaction/summarization.
     pub model: Option<String>,
+    /// Reasoning amount for providers that support it.
+    pub reasoning: Option<ReasoningLevel>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -190,6 +192,10 @@ impl OpenAICompatibleProvider {
             "stream": true,
             "stream_options": {"include_usage": true},
         });
+        // OpenAI-style reasoning effort (OpenRouter/o-series/compatible gateways).
+        if let Some(reasoning) = request.reasoning.filter(|level| *level != ReasoningLevel::Off) {
+            body["reasoning_effort"] = json!(reasoning.as_str());
+        }
         if !request.tools.is_empty() {
             body["tools"] = json!(request
                 .tools

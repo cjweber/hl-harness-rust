@@ -4,7 +4,7 @@ use crate::cache::prefix::{create_cache_plan, CachePrefix};
 use crate::model::provider::{Provider, ProviderEvent, ProviderRequest, ProviderKind, SharedProvider};
 use crate::security::permissions::{operation_for, ApprovalResult, OperationRequest};
 use crate::tools::Tool;
-use crate::types::{HarnessEvent, ImageAttachment, Message, Role, ToolCall};
+use crate::types::{HarnessEvent, ImageAttachment, Message, ReasoningLevel, Role, ToolCall};
 use anyhow::{anyhow, bail, Result};
 use std::future::Future;
 use futures_util::StreamExt;
@@ -55,6 +55,7 @@ struct PendingCall {
 pub struct Agent {
     provider: SharedProvider,
     observer: Option<Arc<dyn crate::extensions::AgentObserver>>,
+    reasoning: ReasoningLevel,
     tools: Vec<Arc<dyn Tool>>,
     compaction: CompactionOptions,
     system_prompt: String,
@@ -81,6 +82,7 @@ impl Agent {
         Self {
             provider,
             observer,
+            reasoning: ReasoningLevel::default(),
             tools,
             compaction,
             system_prompt: system_prompt.unwrap_or_else(|| "You are a helpful coding agent.".to_string()),
@@ -93,6 +95,14 @@ impl Agent {
 
     pub fn messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    pub fn set_reasoning(&mut self, level: ReasoningLevel) {
+        self.reasoning = level;
+    }
+
+    pub fn reasoning(&self) -> ReasoningLevel {
+        self.reasoning
     }
 
     fn provider_messages(&self) -> Vec<Message> {
@@ -128,7 +138,7 @@ impl Agent {
             if !summary.trim().is_empty() {
                 break;
             }
-            let mut request = ProviderRequest { messages: vec![Message::system(prompt.clone()), Message::user(transcript.clone())], tools: Vec::new(), model: None };
+            let mut request = ProviderRequest { messages: vec![Message::system(prompt.clone()), Message::user(transcript.clone())], tools: Vec::new(), model: None, reasoning: None };
             request.model = self.compaction.summary_model.clone();
             let mut stream = self.provider.stream(request);
             while let Some(event) = stream.next().await {
@@ -214,6 +224,7 @@ impl Agent {
                 messages: self.provider_messages(),
                 tools: self.tools.iter().map(|tool| tool.declaration().clone()).collect(),
                 model: None,
+                reasoning: Some(self.reasoning),
             };
             let request_started = Instant::now();
             let mut text = String::new();
