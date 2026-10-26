@@ -57,6 +57,88 @@ async fn mcp_connect(manager: &McpManager, name: &str, policy: &SharedGatePolicy
 /// the image-attachment phase of the TUI port.
 static PENDING_IMAGE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+static RUN_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+const QUOTES: [&str; 5] = [
+    "ship small, ship often",
+    "the diff is the truth",
+    "every bug was once a feature request",
+    "read the error message first",
+    "make something delightful",
+];
+
+/// One-line git summary for the `git` widget: branch · changes · ahead/behind.
+fn git_widget_value(cwd: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(cwd)
+        .args(["status", "--porcelain", "--branch"])
+        .output();
+    let Ok(output) = output else { return "git unavailable".to_string() };
+    if !output.status.success() {
+        return "not a git repo".to_string();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut branch = String::new();
+    let mut tracking = String::new();
+    let mut changed = 0usize;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            let (head, tail) = rest.split_once("...").unwrap_or((rest, ""));
+            branch = head.to_string();
+            if let Some((_, info)) = tail.split_once('[') {
+                tracking = info.trim_end_matches(']').to_string();
+            }
+        } else if !line.trim().is_empty() {
+            changed += 1;
+        }
+    }
+    if branch.is_empty() {
+        return "not a git repo".to_string();
+    }
+    let mut value = branch;
+    if changed > 0 {
+        value.push_str(&format!(" · {changed} changed"));
+    } else {
+        value.push_str(" · clean");
+    }
+    if !tracking.is_empty() {
+        value.push_str(&format!(" · {tracking}"));
+    }
+    value
+}
+
+fn refresh_git_widget(ui: &Arc<TerminalUi>) {
+    if let Ok(cwd) = std::env::current_dir() {
+        ui.set_widget_value("git", &git_widget_value(&cwd));
+    }
+}
+
+fn next_quote() -> &'static str {
+    QUOTES[RUN_COUNT.fetch_add(1, Ordering::SeqCst) % QUOTES.len()]
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+/// Context widget value: current window size (last prompt tokens) against the
+/// model context window when known.
+fn context_widget_value(prompt_tokens: u64, window: Option<u64>) -> String {
+    match window {
+        Some(window) if window > 0 => {
+            let percent = (prompt_tokens * 100 / window).min(100);
+            format!("{} / {} tok · {}%", format_token_count(prompt_tokens), format_token_count(window), percent)
+        }
+        _ => format!("{} tok", format_token_count(prompt_tokens)),
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_tui_submit(
     ui: &Arc<TerminalUi>,
@@ -343,6 +425,8 @@ async fn handle_tui_submit(
     cancel.store(false, Ordering::SeqCst);
     busy.store(true, Ordering::SeqCst);
     let ui_task = ui.clone();
+    ui_task.set_quote(next_quote().to_string());
+    ui_task.set_working(true, ui_task.clone());
     let session_task = session_cell.clone();
     let agent_task = agent_cell.clone();
     let options_task = options_cell.clone();
@@ -381,6 +465,8 @@ async fn handle_tui_submit(
             }
         }
         busy_task.store(false, Ordering::SeqCst);
+        ui_task.set_working(false, ui_task.clone());
+        refresh_git_widget(&ui_task);
     });
     Ok(0)
 }
@@ -402,6 +488,7 @@ async fn tui_run_agent(
 ) -> Result<(usize, String)> {
     let options = options_cell.lock().await.clone().ok_or_else(|| anyhow!("provider is not configured"))?;
     let provider = create_provider(&options)?;
+    let context_window = provider.config().context_window;
     let mut tools: Vec<Arc<dyn Tool>> = builtin_tools(&default_config(&std::env::current_dir()?, &home_dir()).cwd);
     if let Some(manager) = mcp_manager.lock().await.as_ref() {
         for name in manager.tool_names() {
@@ -453,13 +540,19 @@ async fn tui_run_agent(
                         ui_task.set_status("Thinking…");
                     }
                     HarnessEvent::CachePlan { plan } => ui_task.set_cache(plan.clone()),
-                    HarnessEvent::Usage { .. } => { /* handled below */ }
+                    HarnessEvent::Usage { prompt_tokens, .. } => {
+                        ui_task.set_widget_value("context", &context_widget_value(*prompt_tokens, context_window));
+                        /* usage persisted below */
+                    }
                     HarnessEvent::ToolStart { call } => {
                         stream_text_task(String::new());
                         ui_task.push_transcript(format!("▣ tool {} {}", call.name, serde_json::to_string(&call.arguments).unwrap_or_default()));
                         ui_task.set_status(&format!("Tool {}: running", call.name));
                     }
                     HarnessEvent::ToolResult { call, output, error } => {
+                        if call.name.starts_with("git") {
+                            refresh_git_widget(&ui_task);
+                        }
                         if call.name == "git_diff" || call.name == "git_show" {
                             ui_task.set_diff(output.clone());
                         }
@@ -534,12 +627,13 @@ pub async fn run_tui() -> Result<i32> {
         &layout,
         vec![
             ("session".to_string(), format!("{session_label} · {} messages", session_cell.lock().await.all_entries().len())),
-            ("context".to_string(), "Context tracking active".to_string()),
+            ("context".to_string(), "0 tok".to_string()),
             ("model".to_string(), {
                 let (settings, _) = load_settings(&config.cwd, &config.pi_config_dir);
                 format!("{} · {}", settings.default_provider.clone().unwrap_or_else(|| "openrouter".into()), settings.default_model.clone().unwrap_or_else(|| "default".into()))
             }),
             ("project".to_string(), config.cwd.display().to_string()),
+            ("git".to_string(), git_widget_value(&config.cwd)),
         ],
     );
     ui.set_on_workspace_change({

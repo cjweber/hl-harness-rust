@@ -36,6 +36,7 @@ pub struct TerminalUi {
     input: Mutex<String>,
     transcript: Mutex<Vec<String>>,
     status: Mutex<String>,
+    quote: Mutex<String>,
     cache: Mutex<Option<CachePlan>>,
     cache_usage: Mutex<Option<CacheUsageView>>,
     secret_mode: AtomicBool,
@@ -76,6 +77,7 @@ impl TerminalUi {
             input: Mutex::new(String::new()),
             transcript: Mutex::new(Vec::new()),
             status: Mutex::new("Ready".to_string()),
+            quote: Mutex::new("make something delightful".to_string()),
             cache: Mutex::new(None),
             cache_usage: Mutex::new(None),
             secret_mode: AtomicBool::new(false),
@@ -290,6 +292,11 @@ impl TerminalUi {
         self.draw();
     }
 
+    pub fn set_quote(&self, quote: String) {
+        *self.quote.lock().unwrap() = quote;
+        self.draw();
+    }
+
     pub fn set_completions(&self, values: Vec<String>) {
         *self.completions.lock().unwrap() = values;
         self.draw();
@@ -417,6 +424,7 @@ impl TerminalUi {
         let transcript = self.transcript.lock().unwrap().clone();
         let input = self.input.lock().unwrap().clone();
         let status = self.status.lock().unwrap().clone();
+        let quote = self.quote.lock().unwrap().clone();
         let pending = self.pending_input.lock().unwrap().as_ref().map(|(prompt, _)| prompt.clone());
         let scroll_offset = *self.scroll_offset.lock().unwrap();
         let (approval_summary, approval_risk) = {
@@ -470,6 +478,7 @@ impl TerminalUi {
                 transcript: &transcript,
                 input: &input_value,
                 status: &status_value,
+                quote: &quote,
                 secret_mode: self.secret_mode.load(Ordering::SeqCst),
                 cache_plan: plan.as_ref(),
                 cache_usage: usage.as_ref(),

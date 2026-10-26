@@ -277,16 +277,50 @@ pub fn render_markdown(value: &str) -> String {
     joined.join("\n").trim_end_matches('\n').to_string()
 }
 
+/// Scaled widget geometry: percentage x/width mapped to real terminal columns.
+/// The right edge is derived from (x + width) so horizontally adjacent widgets
+/// tile exactly — no gaps or overlaps at any terminal width.
+fn widget_span(widget: &super::workspace::WidgetLayout, safe_width: usize) -> (usize, usize) {
+    let left = (((widget.x as f64) / 100.0) * safe_width as f64).round() as usize;
+    let left = left.min(safe_width.saturating_sub(1));
+    let right = (((widget.x + widget.width) as f64 / 100.0) * safe_width as f64).round() as usize;
+    let right = right.max(left + 4).min(safe_width);
+    (left, right - left)
+}
+
+/// Per-widget value tinting: git gets semantic colors (branch / changes /
+/// tracking), other widgets get their section hue at readable brightness.
+fn colorize_value(id: &str, value: &str, hue: &str) -> String {
+    let colors = &current_colors();
+    if id == "git" {
+        if value == "not a git repo" || value == "git unavailable" || value == "No data" {
+            return color(value, colors.muted.as_str());
+        }
+        let parts: Vec<String> = value
+            .split(" · ")
+            .enumerate()
+            .map(|(index, part)| match (index, part) {
+                (0, _) => ansi_bold(&color(part, hue)),
+                (_, "clean") => color(part, colors.success.as_str()),
+                (_, part) if part.ends_with(" changed") => color(part, colors.warning.as_str()),
+                _ => color(part, colors.muted.as_str()),
+            })
+            .collect();
+        parts.join(&color(" · ", colors.muted.as_str()))
+    } else {
+        color(value, &super::theme::lighten(hue, 0.2))
+    }
+}
+
 pub fn render_workspace(layout: &super::workspace::WorkspaceLayout, values: &[(&str, String)], width: usize) -> Vec<String> {
     let safe_width = width.max(20);
     let rows = layout.widgets.iter().map(|widget| widget.y + widget.height).max().unwrap_or(1);
-    // Frame pass: rounded-corner glyphs per cell.
+    // Frame pass: rounded-corner glyphs per cell; value content sits between
+    // symmetric one-column paddings inside the box.
     let mut canvas: Vec<Vec<char>> = vec![vec![' '; safe_width]; rows];
     for widget in layout.widgets.iter().filter(|widget| widget.visible) {
-        let left = (((widget.x as f64) / 100.0) * safe_width as f64).round() as usize;
-        let left = left.min(safe_width - 1);
+        let (left, box_width) = widget_span(widget, safe_width);
         let top = widget.y;
-        let box_width = widget.width.max(4).min(safe_width - left);
         let title = format!(" {} ", widget.id);
         for row in 0..widget.height.min(rows.saturating_sub(top)) {
             for column in 0..box_width {
@@ -311,25 +345,27 @@ pub fn render_workspace(layout: &super::workspace::WorkspaceLayout, values: &[(&
                     }
                 }
             }
-            if row == 1 {
+            if row == 1 && widget.height > 2 {
                 let value = values.iter().find(|(key, _)| *key == widget.id).map(|(_, value)| value.as_str()).unwrap_or("No data");
-                let content: String = value.chars().take(box_width.saturating_sub(4)).collect();
+                let content: String = value.chars().take(box_width.saturating_sub(3)).collect();
                 for (column, ch) in content.chars().enumerate() {
-                    let target = left + column + 1;
-                    if target < safe_width && target <= left + box_width - 2 {
+                    let target = left + column + 2;
+                    if target < safe_width && target < left + box_width - 1 {
                         canvas[top + row][target] = ch;
                     }
                 }
             }
         }
     }
-    // Color pass: per-section hue with a gradient title bar and dimmed frame.
+    // Color pass: per-widget spans anchored at each widget's own left edge, so
+    // rounding never drifts; title rows gradient, value rows colorize content.
     canvas
         .into_iter()
         .enumerate()
         .map(|(row_index, row)| {
             let plain: String = row.iter().collect();
             let plain = plain.trim_end().to_string();
+            let plain_len = plain.chars().count();
             let mut decorated = String::new();
             let mut cursor = 0usize;
             // Visit every widget that claims this row, in left-to-right order.
@@ -337,35 +373,44 @@ pub fn render_workspace(layout: &super::workspace::WorkspaceLayout, values: &[(&
                 .widgets
                 .iter()
                 .filter(|widget| widget.visible)
-                .filter(|widget| {
-                    let left = (((widget.x as f64) / 100.0) * safe_width as f64).round() as usize;
-                    widget.y <= row_index && row_index < widget.y + widget.height
-                })
+                .filter(|widget| widget.y <= row_index && row_index < widget.y + widget.height)
                 .collect();
             for widget in claiming {
-                let left = (((widget.x as f64) / 100.0) * safe_width as f64).round() as usize;
-                let left = left.min(safe_width - 1);
-                let box_width = widget.width.max(4).min(safe_width - left);
-                if left >= decorated.len() {
-                    // Append the unstyled gap before this widget.
-                    let gap_end = left.min(plain.chars().count());
-                    let gap: String = plain.chars().skip(cursor).take(gap_end.saturating_sub(cursor)).collect();
-                    decorated.push_str(&gap);
+                let (left, box_width) = widget_span(widget, safe_width);
+                // Append the unstyled gap before this widget.
+                let gap_end = left.min(plain_len);
+                if gap_end > cursor {
+                    decorated.push_str(&plain.chars().skip(cursor).take(gap_end - cursor).collect::<String>());
                     cursor = gap_end;
                 }
-                let span: String = plain.chars().skip(cursor).take(box_width).collect();
                 let hue = super::theme::section_color(&widget.id);
-                if widget.y == row_index {
+                let dimmed = super::theme::darken(hue, 0.45);
+                if row_index == widget.y {
+                    let span: String = plain.chars().skip(cursor).take(box_width).collect();
                     decorated.push_str(&super::theme::gradient_text(&span, hue, &super::theme::lighten(hue, 0.45)));
+                } else if row_index == widget.y + 1 && widget.height > 2 {
+                    // Value row: dimmed frame, semantically tinted content.
+                    let value = values
+                        .iter()
+                        .find(|(key, _)| *key == widget.id)
+                        .map(|(_, value)| value.clone())
+                        .unwrap_or_else(|| "No data".to_string());
+                    let content: String = value.chars().take(box_width.saturating_sub(3)).collect();
+                    let used = visible_length(&content);
+                    decorated.push_str(&color("│", &dimmed));
+                    decorated.push_str(&color(" ", &dimmed));
+                    decorated.push_str(&colorize_value(&widget.id, &content, hue));
+                    decorated.push_str(&color(&" ".repeat(box_width.saturating_sub(used + 3)), &dimmed));
+                    decorated.push_str(&color("│", &dimmed));
                 } else {
-                    let dimmed = super::theme::darken(hue, 0.45);
+                    let span: String = plain.chars().skip(cursor).take(box_width).collect();
                     let mut shaded = String::new();
                     for ch in span.chars() {
                         shaded.push_str(&color(&ch.to_string(), dimmed.as_str()));
                     }
                     decorated.push_str(&shaded);
                 }
-                cursor = (cursor + box_width).min(plain.chars().count());
+                cursor = (cursor.max(left) + box_width).min(plain_len);
             }
             decorated.push_str(&plain.chars().skip(cursor).collect::<String>());
             decorated
@@ -480,6 +525,7 @@ pub struct DashboardState<'a> {
     pub transcript: &'a [String],
     pub input: &'a str,
     pub status: &'a str,
+    pub quote: &'a str,
     pub secret_mode: bool,
     pub cache_plan: Option<&'a CachePlan>,
     pub cache_usage: Option<&'a CacheUsageView>,
@@ -543,6 +589,9 @@ pub fn render_dashboard(state: &DashboardState<'_>, width: usize, height: usize)
     lines.push(String::new());
     lines.push(fit(&if state.secret_mode { "> ".to_string() } else { format!("> {}", state.input) }, safe_width));
     lines.push(fit(&format!(" {}{}", state.status, if state.working { format!("  {}", pacman_indicator(state.work_frame, colors)) } else { String::new() }), safe_width));
+    if !state.quote.is_empty() {
+        lines.push(fit(&color(&format!(" ~ {}", state.quote), colors.muted.as_str()), safe_width));
+    }
     lines.push(fit(" Enter send · /attach image · /compact · /tree · /branch id · PgUp/PgDn scroll · Ctrl-C quit", safe_width));
     let end = lines.len().saturating_sub(state.scroll_offset);
     let begin = end.saturating_sub(safe_height);

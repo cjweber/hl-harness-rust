@@ -47,6 +47,7 @@ fn dashboard_rows_fit_and_terminate() {
             transcript: &["› you long text wrapping multiple times".to_string(), "● assistant: reply".to_string()],
             input: "typing",
             status: "Ready",
+            quote: "the diff is the truth",
             secret_mode: false,
             cache_plan: None,
             cache_usage: Some(&usage),
@@ -72,6 +73,7 @@ fn dashboard_rows_fit_and_terminate() {
     assert!(visible.contains("Harness"), "{visible:?}");
     assert!(visible.contains("✦"), "gradient banner: {visible:?}");
     assert!(visible.matches("y allow").count() == 1);
+    assert!(visible.contains("the diff is the truth"), "quote line: {visible:?}");
 }
 
 fn strip_ansi(row: &str) -> String {
