@@ -302,6 +302,10 @@ impl TerminalUi {
         self.draw();
     }
 
+    pub fn completions(&self) -> Vec<String> {
+        self.completions.lock().unwrap().clone()
+    }
+
     pub fn set_secret_mode(&self, enabled: bool) {
         self.secret_mode.store(enabled, Ordering::SeqCst);
         self.input.lock().unwrap().clear();

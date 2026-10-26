@@ -17,6 +17,7 @@ const CONVENTIONAL: [(ResourceKind, &str); 4] = [
 
 const EXTENSION_EXTS: [&str; 4] = [".ts", ".js", ".mjs", ".cjs"];
 
+#[derive(Default)]
 pub struct LoadedResources {
     pub registry: ResourceRegistry,
     pub context_files: Vec<String>,

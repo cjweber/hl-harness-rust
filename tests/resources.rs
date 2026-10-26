@@ -53,6 +53,27 @@ fn discover_conventional_directories_and_skill_frontmatter() {
     assert_eq!(resources.registry.list(Some(ResourceKind::Extension)).len(), 2);
 }
 
+#[tokio::test]
+async fn skill_tool_loads_registered_skill_instructions() {
+    use hl_harness::tools::{SkillTool, Tool};
+    let root = temp_dir();
+    std::fs::create_dir_all(root.join("skills/deploy")).unwrap();
+    std::fs::write(root.join("skills/deploy/SKILL.md"), "---\nname: deploy\ndescription: Ship it\n---\nRun the tests first").unwrap();
+    let resources = load_resources(&options(&root, &root, true, Vec::new())).unwrap();
+    let skills: Vec<(String, String)> = resources
+        .registry
+        .list(Some(ResourceKind::Skill))
+        .iter()
+        .map(|entry| (entry.name.clone(), entry.path.clone()))
+        .collect();
+    let tool = SkillTool::from_entries(skills);
+    let output = tool.execute(&json!({"name": "deploy"})).await.unwrap();
+    assert!(output.contains("Run the tests first"), "{output}");
+    assert!(output.contains("SKILL.md"));
+    let error = tool.execute(&json!({"name": "nope"})).await.unwrap_err();
+    assert!(error.to_string().contains("Unknown skill"), "{error}");
+}
+
 #[test]
 fn manifests_expand_globs_and_exclusions() {
     let root = temp_dir();

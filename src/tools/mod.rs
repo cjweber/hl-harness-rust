@@ -731,6 +731,43 @@ pub fn builtin_tools(cwd: &Path) -> Vec<std::sync::Arc<dyn Tool>> {
     create_tools(cwd)
 }
 
+/// Skill expansion: resolves a registered skill name to its SKILL.md
+/// instructions, making the resource-loader registry first-class for agents.
+pub struct SkillTool {
+    declaration: ToolDeclaration,
+    skills: Vec<(String, String)>, // (name, skill directory)
+}
+
+impl SkillTool {
+    pub fn from_entries(skills: Vec<(String, String)>) -> Self {
+        Self {
+            declaration: ToolDeclaration {
+                name: "skill".into(),
+                description: "Load the instructions of an available skill by name.".into(),
+                parameters: object_parameters(json!({"name": {"type": "string", "description": "Skill name from the available-skills list"}}), &["name"]),
+            },
+            skills,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for SkillTool {
+    fn declaration(&self) -> &ToolDeclaration { &self.declaration }
+    fn risk(&self) -> RiskLevel { RiskLevel::Safe }
+    async fn execute(&self, args: &Value) -> Result<String> {
+        let name = string_arg(args, "name").ok_or_else(|| anyhow!("skill requires a name"))?;
+        let path = self
+            .skills
+            .iter()
+            .find(|(entry, _)| *entry == name)
+            .map(|(_, path)| path.clone())
+            .ok_or_else(|| anyhow!("Unknown skill: {name}"))?;
+        let instructions = crate::resources::load_skill_instructions(Path::new(&path))?;
+        Ok(clip(&format!("{instructions}\n\n(skill source: {path}/SKILL.md)"), OUTPUT_LIMIT))
+    }
+}
+
 /// Full tool set with shared runtime state, mirroring the TS `createTools()`.
 pub fn create_tools(cwd: &Path) -> Vec<std::sync::Arc<dyn Tool>> {
     static RUNTIME: std::sync::OnceLock<runtime::Runtime> = std::sync::OnceLock::new();

@@ -149,6 +149,7 @@ async fn handle_tui_submit(
     policy: &SharedGatePolicy,
     max_steps: usize,
     mcp_manager: &Arc<tokio::sync::Mutex<Option<Arc<McpManager>>>>,
+    extension_host: &Arc<tokio::sync::Mutex<Option<Arc<crate::extensions::ExtensionHost>>>>,
     reasoning_cell: &Arc<tokio::sync::Mutex<crate::types::ReasoningLevel>>,
     cancel: &Arc<AtomicBool>,
     busy: &Arc<AtomicBool>,
@@ -411,8 +412,32 @@ async fn handle_tui_submit(
         ui.set_status("API keys: set via environment");
         return Ok(0);
     }
+    // Extension commands: /<name> dispatches to the extension host when the
+    // command is registered there.
     if submitted.starts_with('/') {
-        ui.push_transcript("system: extension-host commands, prompt templates, and skills are not ported yet".into());
+        if let Some(host) = extension_host.lock().await.as_ref() {
+            let body = submitted.trim_start_matches('/');
+            let (name, text) = match body.split_once(' ') {
+                Some((name, text)) => (name, text),
+                None => (body, ""),
+            };
+            if host.command_list().iter().any(|command| command.name == name) {
+                match host.call_command(name, text).await {
+                    Ok(output) => {
+                        if !output.is_empty() {
+                            ui.push_transcript(output);
+                        }
+                        ui.set_status("Extension command complete");
+                    }
+                    Err(error) => {
+                        ui.push_transcript(format!("error: {error}"));
+                        ui.set_status("Extension command failed");
+                    }
+                }
+                return Ok(0);
+            }
+        }
+        ui.push_transcript("system: unknown command".into());
         ui.set_status("Unknown command");
         return Ok(0);
     }
@@ -434,6 +459,7 @@ async fn handle_tui_submit(
     let cancel_task = cancel.clone();
     let busy_task = busy.clone();
     let mcp_task = mcp_manager.clone();
+    let extension_task = extension_host.clone();
     let reasoning_cell_task = reasoning_cell.clone();
     let max_steps_task = max_steps;
     tokio::spawn(async move {
@@ -446,6 +472,7 @@ async fn handle_tui_submit(
             &options_task,
             &policy_task,
             &mcp_task,
+            &extension_task,
             max_steps_task,
             &submitted,
             &cancel_task,
@@ -481,6 +508,7 @@ async fn tui_run_agent(
     options_cell: &Arc<tokio::sync::Mutex<Option<ProviderOptions>>>,
     policy: &SharedGatePolicy,
     mcp_manager: &Arc<tokio::sync::Mutex<Option<Arc<McpManager>>>>,
+    extension_host: &Arc<tokio::sync::Mutex<Option<Arc<crate::extensions::ExtensionHost>>>>,
     max_steps: usize,
     prompt: &str,
     cancel: &Arc<AtomicBool>,
@@ -489,7 +517,41 @@ async fn tui_run_agent(
     let options = options_cell.lock().await.clone().ok_or_else(|| anyhow!("provider is not configured"))?;
     let provider = create_provider(&options)?;
     let context_window = provider.config().context_window;
-    let mut tools: Vec<Arc<dyn Tool>> = builtin_tools(&default_config(&std::env::current_dir()?, &home_dir()).cwd);
+    let config = default_config(&std::env::current_dir()?, &home_dir());
+    let project_trusted = is_project_trusted(&config.cwd, &config.pi_config_dir);
+    // Resources: skills/context/system instructions feed the system prompt and
+    // the skill tool (same loading as the `run` command path).
+    let resources = crate::resources::load_resources(&crate::resources::ResourceLoadOptions {
+        cwd: config.cwd.clone(),
+        personal_dir: config.pi_config_dir.clone(),
+        include_project: true,
+        project_trusted,
+        package_roots: crate::resources::packages::resolve_package_roots(
+            &crate::resources::packages::package_sources_from_settings(&config.pi_config_dir, Some(&config.cwd)),
+            &crate::resources::packages::ResolveOptions { cwd: &config.cwd, personal_dir: &config.pi_config_dir, install: false },
+            &|_| {},
+        ),
+    })
+    .unwrap_or_else(|error| {
+        ui.push_transcript(format!("system: resources failed to load: {error}"));
+        Default::default()
+    });
+    let skills = resources.registry.list(Some(crate::resources::ResourceKind::Skill));
+    let mut tools: Vec<Arc<dyn Tool>> = builtin_tools(&config.cwd);
+    if !skills.is_empty() {
+        tools.push(Arc::new(crate::tools::SkillTool::from_entries(
+            skills.iter().map(|entry| (entry.name.clone(), entry.path.clone())).collect(),
+        )));
+    }
+    // Extension tools from the already-started host.
+    if let Some(host) = extension_host.lock().await.as_ref() {
+        for name in host.tool_names() {
+            match host.tool_wrapper(&name) {
+                Ok(wrapper) => tools.push(wrapper),
+                Err(error) => ui.push_transcript(format!("system: extension tool {name} unavailable: {error}")),
+            }
+        }
+    }
     if let Some(manager) = mcp_manager.lock().await.as_ref() {
         for name in manager.tool_names() {
             if let Some(entry) = manager.get_tool(&name) {
@@ -497,8 +559,18 @@ async fn tui_run_agent(
             }
         }
     }
-    // Reuse retained messages so the agent carries context like the TS flow.
-    let retained = agent_cell.lock().await.as_ref().map(|agent| agent.messages().to_vec()).unwrap_or_default();
+    // Reuse retained messages so the agent carries context like the TS flow;
+    // the leading system message is dropped so the fresh system prompt is the
+    // only one (providers concatenate every system message they see).
+    let retained = agent_cell
+        .lock()
+        .await
+        .as_ref()
+        .map(|agent| agent.messages().to_vec())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|message| message.role != crate::types::Role::System)
+        .collect::<Vec<_>>();
     let mut agent = Agent::new(
         provider,
         tools,
@@ -517,11 +589,15 @@ async fn tui_run_agent(
             }),
             ..CompactionOptions::default()
         },
-        None,
+        Some(resources.system_prompt),
         max_steps,
         retained,
         Some(mcp_approver(policy)),
-        None,
+        extension_host
+            .lock()
+            .await
+            .as_ref()
+            .map(|host| Arc::new(crate::extensions::HostObserver { host: host.clone() }) as Arc<dyn crate::extensions::AgentObserver>),
     );
 
     let ui_task = ui.clone();
@@ -684,6 +760,30 @@ pub async fn run_tui() -> Result<i32> {
     };
     let agent_state: Arc<tokio::sync::Mutex<Option<Agent>>> = Arc::new(tokio::sync::Mutex::new(initial_agent));
     let mcp_manager: Arc<tokio::sync::Mutex<Option<Arc<McpManager>>>> = Arc::new(tokio::sync::Mutex::new(None));
+    // Extension host: trusted project `extensions/` directory (same discovery
+    // as the `run` command); tools, hooks, and slash commands become live.
+    let extension_state: Arc<tokio::sync::Mutex<Option<Arc<crate::extensions::ExtensionHost>>>> = Arc::new(tokio::sync::Mutex::new(None));
+    let extension_paths = crate::extensions::discover_extensions(&config.cwd, project_trusted);
+    if !extension_paths.is_empty() {
+        let host = crate::extensions::ExtensionHost::new(extension_paths, &config.cwd);
+        match host.start().await {
+            Ok(_) => {
+                let tool_names = host.tool_names();
+                let commands = host.command_list();
+                ui.push_transcript(format!("system: extensions loaded ({} tool{})", tool_names.len(), if tool_names.len() == 1 { "" } else { "s" }));
+                for command in &commands {
+                    ui.push_transcript(format!("system: extension command /{} — {}", command.name, command.description));
+                }
+                let mut completions = ui.completions();
+                for command in &commands {
+                    completions.push(format!("/{} ", command.name));
+                }
+                ui.set_completions(completions);
+                *extension_state.lock().await = Some(host);
+            }
+            Err(error) => ui.push_transcript(format!("system: extension host failed: {error}")),
+        }
+    }
     let reasoning_cell: Arc<tokio::sync::Mutex<crate::types::ReasoningLevel>> = Arc::new(tokio::sync::Mutex::new(options.as_ref().and_then(|options| options.reasoning).unwrap_or_default()));
     if let Some(level) = options.as_ref().and_then(|options| options.reasoning) {
         if let Some(agent) = agent_state.lock().await.as_mut() {
@@ -710,12 +810,15 @@ pub async fn run_tui() -> Result<i32> {
                 }
             }
             Intent::Submit(text) => {
-                handle_tui_submit(&ui, &text, &session_cell, &provider_state, &agent_state, &policy, 8, &mcp_manager, &reasoning_cell, &cancel, &busy).await?;
+                handle_tui_submit(&ui, &text, &session_cell, &provider_state, &agent_state, &policy, 8, &mcp_manager, &extension_state, &reasoning_cell, &cancel, &busy).await?;
             }
         }
     }
     if let Some(mcp) = mcp_manager.lock().await.as_ref() {
         mcp.close().await;
+    }
+    if let Some(host) = extension_state.lock().await.as_ref() {
+        host.stop().await;
     }
     let _ = ui_task.await;
     Ok(0)
