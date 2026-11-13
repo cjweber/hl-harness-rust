@@ -159,6 +159,39 @@ async fn handle_tui_submit(
     if submitted.is_empty() {
         return Ok(0);
     }
+    // /skill: list registered skills; /skill:name [args...] loads the skill's
+    // SKILL.md instructions as the prompt body.
+    if submitted == "/skill" {
+        let skills = resources_state.lock().await.registry.list(Some(crate::resources::ResourceKind::Skill));
+        if skills.is_empty() {
+            ui.push_transcript("system: no skills registered".into());
+        }
+        for entry in &skills {
+            ui.push_transcript(format!("{}: {} ({})", entry.name, entry.description.clone().unwrap_or_else(|| "read SKILL.md".into()), entry.path));
+        }
+        ui.set_status("Skills");
+        return Ok(0);
+    }
+    if let Some(rest) = submitted.strip_prefix("/skill:") {
+        let (name, args) = rest.split_once(' ').unwrap_or((rest, ""));
+        let skills = resources_state.lock().await.registry.list(Some(crate::resources::ResourceKind::Skill));
+        let Some(entry) = skills.iter().find(|entry| entry.name == name) else {
+            ui.push_transcript(format!("error: unknown skill {name}"));
+            ui.set_status("Skill lookup failed");
+            return Ok(0);
+        };
+        match crate::resources::load_skill_instructions(std::path::Path::new(&entry.path)) {
+            Ok(instructions) => {
+                ui.push_transcript(format!("system: skill {name} loaded"));
+                submitted = if args.is_empty() { instructions } else { format!("{instructions}\n\n{args}") };
+            }
+            Err(error) => {
+                ui.push_transcript(format!("error: {error}"));
+                ui.set_status("Skill load failed");
+                return Ok(0);
+            }
+        }
+    }
     // /template [name args...]: expand a prompt-template resource in place.
     if let Some(rest) = submitted.strip_prefix("/template") {
         let rest = rest.trim();
