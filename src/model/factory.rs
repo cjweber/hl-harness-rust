@@ -1,7 +1,11 @@
 //! Provider presets and construction, ported from `src/model/provider-factory.ts`.
 
 use super::anthropic::AnthropicProvider;
-use super::provider::{OpenAICompatibleProvider, Provider, ProviderConfig, ProviderKind};
+use super::provider::{OpenAICompatibleProvider, Provider, ProviderConfig, ProviderEvent, ProviderKind, ProviderRequest};
+use async_trait::async_trait;
+use futures_util::stream::BoxStream;
+use futures_util::StreamExt;
+use serde_json::Value;
 use std::sync::Arc;
 
 pub type ProviderId = ProviderKind;
@@ -19,6 +23,8 @@ pub struct ProviderOptions {
     pub max_retries: Option<u32>,
     pub context_window: Option<u64>,
     pub headers: Vec<(String, String)>,
+    /// Ordered fallback providers, tried when the primary fails early.
+    pub fallbacks: Vec<ProviderOptions>,
 }
 
 impl ProviderOptions {
@@ -97,12 +103,118 @@ pub fn provider_config(options: &ProviderOptions) -> anyhow::Result<ProviderConf
     })
 }
 
+/// Parse fallback entries from settings: objects ({provider, model, endpoint,
+/// apiKeyEnv}) or plain strings treated as a model override on the primary's
+/// provider kind.
+pub fn parse_fallbacks(values: &[Value]) -> Vec<ProviderOptions> {
+    values
+        .iter()
+        .filter_map(|value| {
+            let mut options = ProviderOptions::default();
+            match value {
+                Value::String(text) => options.model = Some(text.clone()),
+                Value::Object(map) => {
+                    if let Some(provider) = map.get("provider").and_then(Value::as_str) {
+                        options.provider = ProviderKind::from_str(provider);
+                    }
+                    if let Some(model) = map.get("model").and_then(Value::as_str) {
+                        options.model = Some(model.to_string());
+                    }
+                    if let Some(endpoint) = map.get("endpoint").and_then(Value::as_str) {
+                        options.endpoint = Some(endpoint.to_string());
+                    }
+                    if let Some(key_env) = map.get("apiKeyEnv").and_then(Value::as_str) {
+                        options.api_key_env = Some(key_env.to_string());
+                    }
+                }
+                _ => return None,
+            }
+            if options.provider.is_none() && options.model.is_none() {
+                return None;
+            }
+            Some(options)
+        })
+        .collect()
+}
+
 pub fn create_provider(options: &ProviderOptions) -> anyhow::Result<Arc<dyn Provider>> {
+    let primary = create_single_provider(options)?;
+    if options.fallbacks.is_empty() {
+        return Ok(primary);
+    }
+    let mut fallbacks = Vec::new();
+    for fallback in &options.fallbacks {
+        // Unspecified fallback fields inherit the primary's provider kind.
+        let mut fallback = fallback.clone();
+        if fallback.provider.is_none() {
+            fallback.provider = options.provider;
+        }
+        fallbacks.push(create_single_provider(&fallback)?);
+    }
+    Ok(Arc::new(FallbackProvider::new(primary, fallbacks)))
+}
+
+fn create_single_provider(options: &ProviderOptions) -> anyhow::Result<Arc<dyn Provider>> {
     let config = provider_config(options)?;
     Ok(match config.id {
         ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(config)),
         _ => Arc::new(OpenAICompatibleProvider::new(config)),
     })
+}
+
+/// Ordered fallback chain: a stream that fails before producing any event
+/// falls through to the next provider; failures after the stream started
+/// producing are propagated (mirrors the TS provider fallback behavior).
+pub struct FallbackProvider {
+    primary: Arc<dyn Provider>,
+    fallbacks: Vec<Arc<dyn Provider>>,
+}
+
+impl FallbackProvider {
+    pub fn new(primary: Arc<dyn Provider>, fallbacks: Vec<Arc<dyn Provider>>) -> Self {
+        Self { primary, fallbacks }
+    }
+}
+
+#[async_trait]
+impl Provider for FallbackProvider {
+    fn config(&self) -> &ProviderConfig {
+        self.primary.config()
+    }
+
+    fn stream(&self, request: ProviderRequest) -> BoxStream<'_, anyhow::Result<ProviderEvent>> {
+        let chain: Vec<Arc<dyn Provider>> = std::iter::once(self.primary.clone()).chain(self.fallbacks.iter().cloned()).collect();
+        Box::pin(async_stream::try_stream! {
+            let mut last_error: Option<anyhow::Error> = None;
+            for provider in chain {
+                let mut stream = provider.stream(request.clone());
+                let mut produced = false;
+                let mut failed_early = false;
+                loop {
+                    match stream.next().await {
+                        Some(Ok(event)) => {
+                            produced = true;
+                            yield event;
+                        }
+                        Some(Err(error)) => {
+                            if produced {
+                                // Mid-stream errors after output propagate.
+                                Err(anyhow::anyhow!("{error}"))?;
+                            }
+                            failed_early = true;
+                            last_error = Some(error);
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+                if !failed_early {
+                    return;
+                }
+            }
+            Err(last_error.unwrap_or_else(|| anyhow::anyhow!("provider fallback chain failed")))?;
+        })
+    }
 }
 
 #[cfg(test)]

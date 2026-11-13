@@ -32,6 +32,7 @@ pub struct HarnessSettings {
     pub context_window: Option<f64>,
     pub theme: Option<String>,
     pub default_thinking_level: Option<String>,
+    pub fallbacks: Option<Vec<Value>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -88,6 +89,9 @@ pub fn load_settings(cwd: &Path, config_dir: &Path) -> (HarnessSettings, Vec<Pat
         }
         if settings.default_thinking_level.is_none() {
             settings.default_thinking_level = values.get("defaultThinkingLevel").and_then(Value::as_str).map(str::to_string);
+        }
+        if settings.fallbacks.is_none() {
+            settings.fallbacks = values.get("fallbacks").and_then(Value::as_array).cloned();
         }
     };
     let mut sources = Vec::new();

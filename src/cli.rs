@@ -127,7 +127,8 @@ pub fn apply_settings(
 ) -> Result<(ProviderId, ProviderOptions)> {
     let config = default_config(&std::env::current_dir()?, &home_dir());
     let (settings, _) = load_settings(&config.cwd, &config.pi_config_dir);
-    let HarnessSettings { default_provider, default_model, endpoint, api_key_env, context_window, theme: _, default_thinking_level } = settings;
+    let HarnessSettings { default_provider, default_model, endpoint, api_key_env, context_window, theme: _, default_thinking_level, fallbacks } = settings;
+    let fallbacks = crate::model::factory::parse_fallbacks(fallbacks.as_deref().unwrap_or(&[]));
     let provider_name = cli_provider.map(str::to_string).or(default_provider).unwrap_or_else(|| "openrouter".to_string());
     let provider = ProviderId::from_str(&provider_name).ok_or_else(|| anyhow::anyhow!("Unknown provider: {provider_name}"))?;
     let env_model = std::env::var(format!("{}_MODEL", provider.as_str().to_uppercase().replace('-', "_")))
@@ -144,7 +145,7 @@ pub fn apply_settings(
     let reasoning = reasoning_name.as_deref().and_then(crate::types::ReasoningLevel::from_str);
     Ok((
         provider,
-        ProviderOptions { provider: Some(provider), model, endpoint, api_key: None, api_key_env, session_id: None, timeout_ms: None, max_retries: None, context_window, headers: Vec::new(), reasoning },
+        ProviderOptions { provider: Some(provider), model, endpoint, api_key: None, api_key_env, session_id: None, timeout_ms: None, max_retries: None, context_window, headers: Vec::new(), reasoning, fallbacks },
     ))
 }
 

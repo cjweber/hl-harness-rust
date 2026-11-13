@@ -1001,3 +1001,63 @@ fn captured_server_shared() -> &'static Arc<std::sync::Mutex<String>> {
     static CELL: std::sync::OnceLock<Arc<std::sync::Mutex<String>>> = std::sync::OnceLock::new();
     CELL.get_or_init(|| Arc::new(std::sync::Mutex::new(String::new())))
 }
+
+fn fallback_config() -> ProviderConfig {
+    ProviderConfig { id: ProviderKind::Custom, name: "test".into(), base_url: "http://localhost:1/v1".into(), api_key: None, model: "test-model".into(), session_id: None, headers: Vec::new(), timeout_ms: None, max_retries: Some(0), retry_delay_ms: None, context_window: None }
+}
+
+struct FailingProvider;
+#[async_trait::async_trait]
+impl Provider for FailingProvider {
+    fn config(&self) -> &ProviderConfig {
+        unreachable!("config only consulted on the primary")
+    }
+    fn stream(&self, _request: ProviderRequest) -> futures_util::stream::BoxStream<'static, anyhow::Result<ProviderEvent>> {
+        Box::pin(futures_util::stream::once(async { Err(anyhow::anyhow!("primary is down")) }))
+    }
+}
+
+struct WorkingProvider;
+#[async_trait::async_trait]
+impl Provider for WorkingProvider {
+    fn config(&self) -> &ProviderConfig {
+        unreachable!("config only consulted on the primary")
+    }
+    fn stream(&self, _request: ProviderRequest) -> futures_util::stream::BoxStream<'static, anyhow::Result<ProviderEvent>> {
+        Box::pin(async_stream::try_stream! {
+            yield ProviderEvent::TextDelta { text: "fallback".into() };
+            yield ProviderEvent::Done { finish_reason: "stop".into() };
+        })
+    }
+}
+
+#[tokio::test]
+async fn fallback_provider_falls_through_on_early_failure() {
+    use hl_harness::model::factory::FallbackProvider;
+    let provider = FallbackProvider::new(Arc::new(FailingProvider), vec![Arc::new(WorkingProvider)]);
+    let events: Vec<_> = provider.stream(ProviderRequest::default()).map(|event| event.unwrap()).collect().await;
+    let texts: Vec<String> = events.iter().filter_map(|event| match event {
+        ProviderEvent::TextDelta { text } => Some(text.clone()),
+        _ => None,
+    }).collect();
+    assert_eq!(texts, vec!["fallback".to_string()]);
+}
+
+#[tokio::test]
+async fn fallback_provider_surfaces_last_error_when_all_fail() {
+    use hl_harness::model::factory::FallbackProvider;
+    let provider = FallbackProvider::new(Arc::new(FailingProvider), vec![Arc::new(FailingProvider)]);
+    let mut stream = provider.stream(ProviderRequest::default());
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("primary is down"), "{error}");
+}
+
+#[test]
+fn parse_fallbacks_from_settings_values() {
+    use hl_harness::model::factory::parse_fallbacks;
+    let parsed = parse_fallbacks(&[json!("gpt-4o"), json!({"provider": "anthropic", "model": "claude-x"}), json!(null)]);
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0].model.as_deref(), Some("gpt-4o"));
+    assert_eq!(parsed[1].provider, Some(ProviderKind::Anthropic));
+    assert_eq!(parsed[1].model.as_deref(), Some("claude-x"));
+}
