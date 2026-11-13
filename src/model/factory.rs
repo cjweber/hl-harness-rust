@@ -38,6 +38,11 @@ struct Preset {
     key_env: &'static str,
 }
 
+/// The default API-key environment variable for a provider kind.
+pub fn api_key_env_for(id: ProviderKind) -> &'static str {
+    preset(id).key_env
+}
+
 fn preset(id: ProviderKind) -> Preset {
     match id {
         ProviderKind::OpenRouter => Preset { endpoint: "https://openrouter.ai/api/v1", model: "openai/gpt-4o-mini", key_env: "OPENROUTER_API_KEY" },

@@ -411,13 +411,9 @@ async fn handle_tui_submit(
             }
         }
         options.model = Some(model_word.to_string());
-        match create_provider(&options) {
-            Ok(provider) => {
+        match rebuild_agent(&options, agent_cell, policy, max_steps, resources_state, extension_host, reasoning_cell).await {
+            Ok(_) => {
                 *options_cell.lock().await = Some(options.clone());
-                let messages = agent_cell.lock().await.as_ref().map(|agent| agent.messages().to_vec()).unwrap_or_default();
-                let mut agent = Agent::new(provider, builtin_tools(&config_path()), CompactionOptions::default(), None, max_steps, messages, Some(mcp_approver(policy)), None);
-                agent.set_reasoning(*reasoning_cell.lock().await);
-                *agent_cell.lock().await = Some(agent);
                 ui.set_widget_value("model", &format!("{} · {}", options.provider.unwrap_or(ProviderId::OpenRouter).as_str(), model_word));
                 ui.push_transcript(format!("system: model switched to {model_word}"));
                 ui.set_status("Model switched");
@@ -473,9 +469,53 @@ async fn handle_tui_submit(
         }
         return Ok(0);
     }
-    if submitted == "/auth" || submitted == "/login" {
-        ui.push_transcript("system: /auth is not ported yet; set OPENCODE_API_KEY, OPENROUTER_API_KEY, ANTHROPIC_API_KEY, or HARNESS_API_KEY in the environment".into());
-        ui.set_status("API keys: set via environment");
+    // /auth [provider [key]] (alias /login): inspect key env vars or configure
+    // a provider with a key for this session (set_var + agent rebuild).
+    if submitted == "/auth" || submitted == "/login" || submitted.starts_with("/auth ") || submitted.starts_with("/login ") {
+        let command_len = if submitted.starts_with("/auth") { 5 } else { 6 };
+        let rest = submitted[command_len..].trim();
+        const PROVIDERS: [ProviderId; 4] = [ProviderId::OpenRouter, ProviderId::OpenCodeGo, ProviderId::Anthropic, ProviderId::Custom];
+        if rest.is_empty() {
+            for provider in PROVIDERS {
+                let env = crate::model::factory::api_key_env_for(provider);
+                let state = std::env::var(env).ok().filter(|value| !value.is_empty()).map(|_| "set").unwrap_or("missing");
+                ui.push_transcript(format!("{}: {env} ({state})", provider.as_str()));
+            }
+            ui.push_transcript("system: usage: /auth <provider> <api-key> (or set the env var; alias /login)".into());
+            ui.set_status("API key status");
+            return Ok(0);
+        }
+        let (provider_word, key) = rest.split_once(' ').unwrap_or((rest, ""));
+        let Some(provider) = ProviderId::from_str(provider_word) else {
+            ui.push_transcript(format!("error: unknown provider {provider_word}"));
+            ui.set_status("Auth provider unknown");
+            return Ok(0);
+        };
+        let env = crate::model::factory::api_key_env_for(provider);
+        if !key.is_empty() {
+            std::env::set_var(env, key);
+        } else if std::env::var(env).ok().filter(|value| !value.is_empty()).is_none() {
+            ui.push_transcript(format!("error: {env} is not set; pass a key: /auth {provider_word} <api-key>"));
+            ui.set_status("API key missing");
+            return Ok(0);
+        }
+        let mut options = options_cell.lock().await.clone().unwrap_or_default();
+        options.provider = Some(provider);
+        options.model = None; // preset default for the new provider
+        options.endpoint = None;
+        options.api_key_env = None;
+        match rebuild_agent(&options, agent_cell, policy, max_steps, resources_state, extension_host, reasoning_cell).await {
+            Ok(_) => {
+                *options_cell.lock().await = Some(options);
+                ui.set_widget_value("model", &format!("{} · default", provider.as_str()));
+                ui.push_transcript(format!("system: provider switched to {} via {env}", provider.as_str()));
+                ui.set_status("Provider configured");
+            }
+            Err(error) => {
+                ui.push_transcript(format!("error: {error}"));
+                ui.set_status("Provider configuration failed");
+            }
+        }
         return Ok(0);
     }
     // Extension commands: /<name> dispatches to the extension host when the
@@ -902,6 +942,40 @@ pub async fn run_tui() -> Result<i32> {
     }
     let _ = ui_task.await;
     Ok(0)
+}
+
+/// Rebuild the retained agent after a provider change: carries messages (minus
+/// the stale system prompt), the resources system prompt, and extension hooks.
+async fn rebuild_agent(
+    options: &ProviderOptions,
+    agent_cell: &Arc<tokio::sync::Mutex<Option<Agent>>>,
+    policy: &SharedGatePolicy,
+    max_steps: usize,
+    resources_state: &Arc<tokio::sync::Mutex<crate::resources::LoadedResources>>,
+    extension_host: &Arc<tokio::sync::Mutex<Option<Arc<crate::extensions::ExtensionHost>>>>,
+    reasoning_cell: &Arc<tokio::sync::Mutex<crate::types::ReasoningLevel>>,
+) -> Result<()> {
+    let provider = create_provider(options)?;
+    let messages = agent_cell.lock().await.as_ref().map(|agent| agent.messages().to_vec()).unwrap_or_default();
+    let messages = messages.into_iter().filter(|message| message.role != crate::types::Role::System).collect::<Vec<_>>();
+    let resources = resources_state.lock().await;
+    let mut agent = Agent::new(
+        provider,
+        builtin_tools(&config_path()),
+        CompactionOptions::default(),
+        Some(resources.system_prompt.clone()),
+        max_steps,
+        messages,
+        Some(mcp_approver(policy)),
+        extension_host
+            .lock()
+            .await
+            .as_ref()
+            .map(|host| Arc::new(crate::extensions::HostObserver { host: host.clone() }) as Arc<dyn crate::extensions::AgentObserver>),
+    );
+    agent.set_reasoning(*reasoning_cell.lock().await);
+    *agent_cell.lock().await = Some(agent);
+    Ok(())
 }
 
 fn config_path() -> std::path::PathBuf {
