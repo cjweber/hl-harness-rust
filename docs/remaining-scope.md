@@ -2,6 +2,8 @@
 
 The Rust crate mirrors the TypeScript harness functionally. This file tracks what is ported and what still lives only in the TypeScript implementation. Persisted/wire formats (session JSONL, cache prefix hashes, event JSON, permissions rules, settings keys) are byte-compatible with TypeScript; runtime-only internals may differ.
 
+Status: functionally at parity except the two items in “Not ported yet” below. Earlier sections listed the old not-ported list (TUI, MCP, extensions/packages, console surfaces); all of those have since landed — the phase 8 section summarizes the final interactive-TUI gap closure.
+
 ## Ported (phase 1)
 
 - Core event/tool loop, compaction with model summary + deterministic fallback.
@@ -48,13 +50,21 @@ The Rust crate mirrors the TypeScript harness functionally. This file tracks wha
 - SQLite (`database_query` read-only SELECT/EXPLAIN, `database_execute`) on `rusqlite` (bundled), run on the blocking pool.
 - Session compaction persistence: `appendCompactionFromMessageIndex` ported and wired into the CLI compaction callback.
 
+## Ported (phase 8, interactive TUI completion)
+
+- Full TUI feature set on crossterm: alternate-screen dashboard, transcript with markdown/tool cards, workspace widgets (exact tiling at any terminal width, per-section hues, semantic value tinting), diff/cache/conflicts views, approval modal, secret mode, MCP elicitation prompts, pacman working animation, quote line.
+- Workspace widgets wired to live data: `git` (branch · changes · ahead/behind, refreshed after git tool calls and runs), `context` (window size vs provider context window with percent), `model`, `session`, `cache`, `project`.
+- Skills: resources loaded once at TUI startup into the agent system prompt (same loader as `run`), first-class `skill` tool resolving SKILL.md instructions, `/skill` listing and `/skill:name [args...]` prompt expansion.
+- Prompt templates: `/template` listing and `/template <name> [args...]` `$ARGUMENTS`/`${N}` expansion submitted as a prompt.
+- Extensions in the TUI: trusted-project host starts at launch (same Node runner and protocol as `run`), extension tools join every run, `before_tool`/`after_tool`/`emit` hooks fire via the agent observer, `/<name>` slash commands dispatch to the host, completions include them, clean shutdown on quit.
+- `/auth <provider> <api-key>` (alias `/login`): per-session key configuration with agent rebuild (shared `rebuild_agent` helper also upgrades `/model` with the resources system prompt and extension hooks); `/auth` alone reports each provider's key env status.
+- Image attachments: `/attach` stages images and the next submission sends them through `run_checked`.
+- Provider runtime extras: ordered provider fallbacks from the `fallbacks` settings key (`FallbackProvider`: early-failure fall-through, mid-stream error propagation, exhausted-chain last error) and usage/cost normalization (provider-supplied `usage.cost` flows through `Usage` events).
+
 ## Not ported yet (in functional order)
 
-1. **TUI** — transcript, tool cards, workspace widgets, diff/cache/conflicts views, approval modal, MCP elicitation/sampling prompts. (The Rust TUI will use crossterm/ratatui with the same feature set.)
-2. **MCP** — stdio + Streamable HTTP clients, OAuth persistence, elicitation/sampling, permission-gated `mcp__server__tool` calls.
-4. **Extensions/packages** — child-process extension host (custom tools, commands, providers, hooks), resource discovery, package install/update/remove, package settings layers.
-5. **Provider runtime extras** — abort/cancellation plumbing (TS `AbortSignal` ⇄ tokio cancellation), provider-specific reasoning blocks, usage/cost normalization, provider fallbacks.
-6. **Console surfaces** — `packages` CLI, prompt templates, skills, `/skill:name`, image attachment previewing; `--image` load is ported but without preview tooling.
+1. **Provider reasoning blocks** — Anthropic `thinking` config is sent and OpenAI-compatible `reasoning_effort` is set, but reasoning deltas (`thinking_delta` SSE events) are not surfaced as agent events yet.
+2. **Image preview tooling** — images attach and send, but there is no preview rendering (the TS harness has none in the terminal either).
 
 ## Deliberate differences
 
