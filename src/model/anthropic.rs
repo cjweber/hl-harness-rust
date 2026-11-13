@@ -256,7 +256,7 @@ impl Provider for AnthropicProvider {
                         arguments_delta: Some(if arguments.is_empty() { "{}".to_string() } else { arguments.clone() }),
                     };
                 }
-                yield ProviderEvent::Usage { prompt_tokens: state.prompt_tokens, completion_tokens: state.completion_tokens, cached_tokens: state.cached_tokens };
+                yield ProviderEvent::Usage { prompt_tokens: state.prompt_tokens, completion_tokens: state.completion_tokens, cached_tokens: state.cached_tokens, cost: None };
                 yield ProviderEvent::Done { finish_reason: state.finish_reason };
             }
         })

@@ -196,12 +196,13 @@ fn print_event(event: &HarnessEvent, json_mode: bool) {
         return;
     }
     match event {
-        HarnessEvent::Usage { prompt_tokens, completion_tokens, cached_tokens, latency_ms, prefix_hash, .. } => {
+        HarnessEvent::Usage { prompt_tokens, completion_tokens, cached_tokens, latency_ms, prefix_hash, cost, .. } => {
             let hit = if *prompt_tokens > 0 { *cached_tokens * 100 / *prompt_tokens } else { 0 };
             eprintln!(
-                "\n[usage] prompt={prompt_tokens} completion={completion_tokens} cached={cached_tokens} hit={hit}%{}{}",
+                "\n[usage] prompt={prompt_tokens} completion={completion_tokens} cached={cached_tokens} hit={hit}%{}{}{}",
                 latency_ms.map(|ms| format!(" latency={ms}ms")).unwrap_or_default(),
-                prefix_hash.as_deref().map(|hash| format!(" prefix={}", &hash[..8.min(hash.len())])).unwrap_or_default()
+                prefix_hash.as_deref().map(|hash| format!(" prefix={}", &hash[..8.min(hash.len())])).unwrap_or_default(),
+                cost.map(|value| format!(" cost=${value:.6}")).unwrap_or_default(),
             );
         }
         HarnessEvent::ToolStart { call } => println!("\n[tool] {}", call.name),
@@ -361,7 +362,7 @@ async fn run_command(
                     HarnessEvent::ToolResult { call, output, .. } => {
                         let _ = store.append_message(&Message::tool(output.clone(), call.id.clone(), call.name.clone()));
                     }
-                    HarnessEvent::Usage { prompt_tokens, completion_tokens, cached_tokens, prefix_hash, prefix_tokens, suffix_tokens, latency_ms } => {
+                    HarnessEvent::Usage { prompt_tokens, completion_tokens, cached_tokens, prefix_hash, prefix_tokens, suffix_tokens, latency_ms, cost: _ } => {
                         let _ = store.append_usage("model", *prompt_tokens, *completion_tokens, *cached_tokens);
                         if let Some(prefix_hash) = prefix_hash {
                             let _ = store.append_cache(&options.provider.map(|id| id.as_str()).unwrap_or("?"), options.model.as_deref().unwrap_or("default"), prefix_hash, prefix_tokens.unwrap_or(0), suffix_tokens.unwrap_or(0), *prompt_tokens, *completion_tokens, *cached_tokens, *latency_ms);

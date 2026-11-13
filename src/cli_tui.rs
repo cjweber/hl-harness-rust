@@ -741,7 +741,7 @@ async fn tui_run_agent(
                     _ => {}
                 }
                 // Persist selected events to the session.
-                if let HarnessEvent::Usage { prompt_tokens, completion_tokens, cached_tokens, prefix_hash, prefix_tokens, suffix_tokens, latency_ms } = event.clone() {
+                if let HarnessEvent::Usage { prompt_tokens, completion_tokens, cached_tokens, prefix_hash, prefix_tokens, suffix_tokens, latency_ms, cost: _ } = event.clone() {
                     std::thread::spawn(move || {
                         if let Ok(mut session) = session_task.try_lock() {
                             let _ = session.append_usage("model", prompt_tokens, completion_tokens, cached_tokens);

@@ -169,6 +169,7 @@ pub enum HarnessEvent {
         #[serde(skip_serializing_if = "Option::is_none")] prefix_tokens: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")] suffix_tokens: Option<usize>,
         #[serde(skip_serializing_if = "Option::is_none")] latency_ms: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")] cost: Option<f64>,
     },
     Error { message: String },
     Status { text: String },

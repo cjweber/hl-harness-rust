@@ -73,7 +73,7 @@ pub struct ProviderRequest {
 pub enum ProviderEvent {
     TextDelta { text: String },
     ToolCallDelta { index: usize, id: Option<String>, name: Option<String>, arguments_delta: Option<String> },
-    Usage { prompt_tokens: u64, completion_tokens: u64, cached_tokens: u64 },
+    Usage { prompt_tokens: u64, completion_tokens: u64, cached_tokens: u64, cost: Option<f64> },
     Done { finish_reason: String },
 }
 
@@ -288,6 +288,8 @@ fn consume_block(block: &str, next_tool_index: &mut usize, finish_reason: &mut S
                     prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0),
                     completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0),
                     cached_tokens: usage["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+                    // OpenRouter-style normalized cost, when the provider supplies it.
+                    cost: usage["cost"].as_f64(),
                 });
             }
         }

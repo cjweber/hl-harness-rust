@@ -237,11 +237,12 @@ impl Agent {
                             text.push_str(&delta);
                             on_event(HarnessEvent::AssistantDelta { text: delta });
                         }
-                        ProviderEvent::Usage { prompt_tokens, completion_tokens, cached_tokens } => {
+                        ProviderEvent::Usage { prompt_tokens, completion_tokens, cached_tokens, cost } => {
                             on_event(HarnessEvent::Usage {
                                 prompt_tokens,
                                 completion_tokens,
                                 cached_tokens,
+                                cost,
                                 prefix_hash: Some(plan.prefix_hash.clone()),
                                 prefix_tokens: Some(plan.estimated_prefix_tokens),
                                 suffix_tokens: Some(plan.estimated_suffix_tokens),

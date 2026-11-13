@@ -104,7 +104,7 @@ async fn provider_streams_text_usage_and_tool_calls_over_sse() {
     let joined = collected.join("\n");
     assert!(joined.contains("TextDelta { text: \"hello\" }"), "{joined}");
     assert!(joined.contains("\"read\""), "{joined}");
-    assert!(joined.contains("Usage { prompt_tokens: 100, completion_tokens: 7, cached_tokens: 40 }"), "{joined}");
+    assert!(joined.contains("Usage { prompt_tokens: 100, completion_tokens: 7, cached_tokens: 40, cost: None }"), "{joined}");
     assert!(joined.contains("finish_reason: \"tool_calls\""), "{joined}");
 
     // Request parity checks: URL, auth header, session-affinity header, client header.
@@ -1060,4 +1060,17 @@ fn parse_fallbacks_from_settings_values() {
     assert_eq!(parsed[0].model.as_deref(), Some("gpt-4o"));
     assert_eq!(parsed[1].provider, Some(ProviderKind::Anthropic));
     assert_eq!(parsed[1].model.as_deref(), Some("claude-x"));
+}
+
+#[tokio::test]
+async fn usage_normalizes_provider_cost() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"cost\":0.0125}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let server = MockServer::start(body, 200).await;
+    let provider = sse_provider(server.url());
+    let events: Vec<ProviderEvent> = provider.stream(ProviderRequest { messages: vec![Message::user("hi")], tools: Vec::new(), model: None, reasoning: None }).map(|event| event.unwrap()).collect().await;
+    let joined = events.iter().map(|event| format!("{event:?}")).collect::<Vec<_>>().join("\n");
+    assert!(joined.contains("cost: Some(0.0125)"), "{joined}");
 }
