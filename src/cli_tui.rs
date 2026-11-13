@@ -53,9 +53,12 @@ async fn mcp_connect(manager: &McpManager, name: &str, policy: &SharedGatePolicy
     Ok(tool_count(manager, name))
 }
 
-/// Placeholder for the pending-images store; multi-image submission lands with
-/// the image-attachment phase of the TUI port.
-static PENDING_IMAGE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Images staged by /attach; drained into the next agent submission.
+static PENDING_IMAGES: std::sync::Mutex<Vec<ImageAttachment>> = std::sync::Mutex::new(Vec::new());
+
+fn pending_image_count() -> usize {
+    PENDING_IMAGES.lock().unwrap().len()
+}
 
 static RUN_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -373,9 +376,9 @@ async fn handle_tui_submit(
         }
         match crate::cli::load_images_public(&[std::path::PathBuf::from(&path)]) {
             Ok(images) => {
-                PENDING_IMAGE_COUNT.fetch_add(images.len(), Ordering::SeqCst);
+                PENDING_IMAGES.lock().unwrap().extend(images);
                 ui.push_transcript(format!("system: attached {path}"));
-                ui.set_status(&format!("{} image{} attached", PENDING_IMAGE_COUNT.load(Ordering::SeqCst), if images.len() == 1 { "" } else { "s" }));
+                ui.set_status(&format!("{} image{} attached", pending_image_count(), if pending_image_count() == 1 { "" } else { "s" }));
             }
             Err(error) => {
                 ui.push_transcript(format!("error: {error}"));
@@ -694,6 +697,10 @@ async fn tui_run_agent(
 
     let ui_task = ui.clone();
     let session_task = session_cell.clone();
+    let images = PENDING_IMAGES.lock().unwrap().drain(..).collect::<Vec<_>>();
+    if !images.is_empty() {
+        ui.push_transcript(format!("system: sending {} attached image{}", images.len(), if images.len() == 1 { "" } else { "s" }));
+    }
     let mut stream_text = String::new();
     let result = agent
         .run_checked(
@@ -745,7 +752,7 @@ async fn tui_run_agent(
                     });
                 }
             },
-            Vec::new(),
+            images,
             Some(cancel.clone()),
         )
         .await;
