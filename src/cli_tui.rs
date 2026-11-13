@@ -150,13 +150,46 @@ async fn handle_tui_submit(
     max_steps: usize,
     mcp_manager: &Arc<tokio::sync::Mutex<Option<Arc<McpManager>>>>,
     extension_host: &Arc<tokio::sync::Mutex<Option<Arc<crate::extensions::ExtensionHost>>>>,
+    resources_state: &Arc<tokio::sync::Mutex<crate::resources::LoadedResources>>,
     reasoning_cell: &Arc<tokio::sync::Mutex<crate::types::ReasoningLevel>>,
     cancel: &Arc<AtomicBool>,
     busy: &Arc<AtomicBool>,
 ) -> Result<i32> {
-    let submitted = submitted.trim().to_string();
+    let mut submitted = submitted.trim().to_string();
     if submitted.is_empty() {
         return Ok(0);
+    }
+    // /template [name args...]: expand a prompt-template resource in place.
+    if let Some(rest) = submitted.strip_prefix("/template") {
+        let rest = rest.trim();
+        let templates = resources_state.lock().await.registry.list(Some(crate::resources::ResourceKind::Prompt));
+        if rest.is_empty() {
+            if templates.is_empty() {
+                ui.push_transcript("system: no prompt templates registered".into());
+            }
+            for entry in &templates {
+                ui.push_transcript(format!("{}: {} ({})", entry.name, entry.description.clone().unwrap_or_default(), entry.path));
+            }
+            ui.set_status("Prompt templates");
+            return Ok(0);
+        }
+        let (name, args) = rest.split_once(' ').unwrap_or((rest, ""));
+        let Some(entry) = templates.iter().find(|entry| entry.name == name) else {
+            ui.push_transcript(format!("error: unknown template {name}"));
+            ui.set_status("Template lookup failed");
+            return Ok(0);
+        };
+        match crate::resources::expand_prompt_template(std::path::Path::new(&entry.path), args) {
+            Ok(expanded) => {
+                ui.push_transcript(format!("system: template {name} expanded"));
+                submitted = expanded;
+            }
+            Err(error) => {
+                ui.push_transcript(format!("error: {error}"));
+                ui.set_status("Template expansion failed");
+                return Ok(0);
+            }
+        }
     }
     if submitted == "/trust" {
         ui.push_transcript("system: type /trust yes to trust this project, or /trust no to keep it untrusted".into());
@@ -460,6 +493,7 @@ async fn handle_tui_submit(
     let busy_task = busy.clone();
     let mcp_task = mcp_manager.clone();
     let extension_task = extension_host.clone();
+    let resources_task = resources_state.clone();
     let reasoning_cell_task = reasoning_cell.clone();
     let max_steps_task = max_steps;
     tokio::spawn(async move {
@@ -473,6 +507,7 @@ async fn handle_tui_submit(
             &policy_task,
             &mcp_task,
             &extension_task,
+            &resources_task,
             max_steps_task,
             &submitted,
             &cancel_task,
@@ -509,6 +544,7 @@ async fn tui_run_agent(
     policy: &SharedGatePolicy,
     mcp_manager: &Arc<tokio::sync::Mutex<Option<Arc<McpManager>>>>,
     extension_host: &Arc<tokio::sync::Mutex<Option<Arc<crate::extensions::ExtensionHost>>>>,
+    resources_state: &Arc<tokio::sync::Mutex<crate::resources::LoadedResources>>,
     max_steps: usize,
     prompt: &str,
     cancel: &Arc<AtomicBool>,
@@ -518,24 +554,7 @@ async fn tui_run_agent(
     let provider = create_provider(&options)?;
     let context_window = provider.config().context_window;
     let config = default_config(&std::env::current_dir()?, &home_dir());
-    let project_trusted = is_project_trusted(&config.cwd, &config.pi_config_dir);
-    // Resources: skills/context/system instructions feed the system prompt and
-    // the skill tool (same loading as the `run` command path).
-    let resources = crate::resources::load_resources(&crate::resources::ResourceLoadOptions {
-        cwd: config.cwd.clone(),
-        personal_dir: config.pi_config_dir.clone(),
-        include_project: true,
-        project_trusted,
-        package_roots: crate::resources::packages::resolve_package_roots(
-            &crate::resources::packages::package_sources_from_settings(&config.pi_config_dir, Some(&config.cwd)),
-            &crate::resources::packages::ResolveOptions { cwd: &config.cwd, personal_dir: &config.pi_config_dir, install: false },
-            &|_| {},
-        ),
-    })
-    .unwrap_or_else(|error| {
-        ui.push_transcript(format!("system: resources failed to load: {error}"));
-        Default::default()
-    });
+    let resources = resources_state.lock().await;
     let skills = resources.registry.list(Some(crate::resources::ResourceKind::Skill));
     let mut tools: Vec<Arc<dyn Tool>> = builtin_tools(&config.cwd);
     if !skills.is_empty() {
@@ -589,7 +608,7 @@ async fn tui_run_agent(
             }),
             ..CompactionOptions::default()
         },
-        Some(resources.system_prompt),
+        Some(resources.system_prompt.clone()),
         max_steps,
         retained,
         Some(mcp_approver(policy)),
@@ -720,6 +739,32 @@ pub async fn run_tui() -> Result<i32> {
         }
     });
 
+    // Resources loaded once at startup: skills/templates/themes feed the agent
+    // system prompt, the skill tool, and the /template and /skill:name commands.
+    let resources = match crate::resources::load_resources(&crate::resources::ResourceLoadOptions {
+        cwd: config.cwd.clone(),
+        personal_dir: config.pi_config_dir.clone(),
+        include_project: true,
+        project_trusted,
+        package_roots: crate::resources::packages::resolve_package_roots(
+            &crate::resources::packages::package_sources_from_settings(&config.pi_config_dir, Some(&config.cwd)),
+            &crate::resources::packages::ResolveOptions { cwd: &config.cwd, personal_dir: &config.pi_config_dir, install: false },
+            &|message| ui.push_transcript(format!("system: packages: {message}")),
+        ),
+    }) {
+        Ok(resources) => {
+            let skills = resources.registry.list(Some(crate::resources::ResourceKind::Skill)).len();
+            let templates = resources.registry.list(Some(crate::resources::ResourceKind::Prompt)).len();
+            ui.push_transcript(format!("system: resources loaded ({skills} skills · {templates} templates)"));
+            resources
+        }
+        Err(error) => {
+            ui.push_transcript(format!("system: resources failed to load: {error}"));
+            Default::default()
+        }
+    };
+    let resources_state = Arc::new(tokio::sync::Mutex::new(resources));
+
     ui.set_completions(vec![
         "/auth ".into(),
         "/login ".into(),
@@ -734,6 +779,8 @@ pub async fn run_tui() -> Result<i32> {
         "/conflicts".into(),
         "/model ".into(),
         "/reasoning ".into(),
+        "/template ".into(),
+        "/skill:".into(),
     ]);
 
     // Provider from settings; failure is shown but not fatal (TS behaves the same).
@@ -810,7 +857,7 @@ pub async fn run_tui() -> Result<i32> {
                 }
             }
             Intent::Submit(text) => {
-                handle_tui_submit(&ui, &text, &session_cell, &provider_state, &agent_state, &policy, 8, &mcp_manager, &extension_state, &reasoning_cell, &cancel, &busy).await?;
+                handle_tui_submit(&ui, &text, &session_cell, &provider_state, &agent_state, &policy, 8, &mcp_manager, &extension_state, &resources_state, &reasoning_cell, &cancel, &busy).await?;
             }
         }
     }
